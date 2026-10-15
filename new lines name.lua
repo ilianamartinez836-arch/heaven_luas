@@ -1,5 +1,5 @@
 local chat_spam = {
-    advertise = "\rO  H  Z  A   Z",
+    advertise = "\rV^ #",
     advertise2 = "",
     advertise3 = "",
     advertise4 = "",
@@ -31,6 +31,7 @@ function on_cl_move_pre()
     local message = build_message()
     client.execnormal('setinfo name "' .. message .. '"')
 end
+
 
 
 

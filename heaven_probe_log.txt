@@ -1,0 +1,71 @@
+========== HEAVEN FULL PROBE ==========
+time_os = Fri Oct  9 17:53:52 2026
+--- CORE ---
+[OK] type(_G) = table | nil | nil
+[OK] ffi rawget = true | nil | nil
+[OK] bit global = false | nil | nil
+[OK] bit.band = nil | nil | nil
+[OK] io.open = true | nil | nil
+--- MODULES / MEMORY ---
+[OK] modules.get_client_base = 1726283776 | nil | nil
+[OK] modules.get_engine_base = 1907228672 | nil | nil
+[OK] memory.read_int(client_base) = 9460301 | nil | nil
+--- FFI / KERNEL32 ---
+[OK] ffi.load kernel32 = true | nil | nil
+[OK] GetModuleHandleA client.dll = cdata<void *>: 66E50000 | nil | nil
+[OK] GetModuleHandleA engine.dll = cdata<void *>: 71AE0000 | nil | nil
+[OK] GetModuleHandleA vstdlib.dll = cdata<void *>: 72280000 | nil | nil
+--- CREATE INTERFACE ---
+iface client.dll / VClient017 -> ptr=0 rc=nil
+iface client.dll / VClient016 -> ptr=0 rc=nil
+iface client.dll / VClient015 -> ptr=0 rc=nil
+iface engine.dll / VEngineClient014 -> ptr=0 rc=nil
+iface engine.dll / VEngineClient013 -> ptr=0 rc=nil
+iface engine.dll / VEngineClient015 -> ptr=0 rc=nil
+iface vstdlib.dll / VEngineCvar007 -> ptr=0 rc=nil
+iface vstdlib.dll / VEngineCvar006 -> ptr=0 rc=nil
+iface engine.dll / VEngineCvar007 -> ptr=0 rc=nil
+--- CLIENT / ENGINE FUNCS ---
+[OK] client.set_extra_commands = true | nil | nil
+[OK] client.set_send_packet = true | nil | nil
+[OK] client.print = true | nil | nil
+[OK] client.get_shared_bool = true | nil | nil
+[OK] engine.get_netchan_ptr = true | nil | nil
+[OK] engine.AddOutSeqNr = false | nil | nil
+[OK] engine.add_out_seq_nr = false | nil | nil
+[OK] engine.is_in_game = true | nil | nil
+[OK] engine.get_netchan_ptr call = 1319436544 | nil | nil
+--- INPUT ---
+[OK] input.is_key_down = true | nil | nil
+[OK] keys.SPACE = 32 | nil | nil
+[OK] keys.KEY_F = 70 | nil | nil
+[OK] keys.MOUSE1 = 1 | nil | nil
+--- MENU / IMGUI ---
+[OK] menu.add_sub_tab = true | nil | nil
+[OK] menu.add_main_tab = true | nil | nil
+[OK] imgui.checkbox = true | nil | nil
+[OK] imgui.Checkbox = false | nil | nil
+[OK] imgui.slider_int = true | nil | nil
+--- ENTITY (load-time; better in-game with F) ---
+[OK] entity.get_local_player = false | nil | nil
+[OK] entity.get_by_index = true | nil | nil
+--- LOCAL PLAYER load ---
+local_player = nil
+--- HOOKS NOTE ---
+on_create_move / on_copy_command_movement_pre / on_cl_move_pre / on_end_scene / on_unload
+Press F in-game to refresh local player + cmd dump
+========== END LOAD PROBE ==========
+[FILE] saved: C:\Heaven-L4D2\scripts\heaven_probe_log.txt
+========== IN-GAME DUMP (F) ==========
+cmd local_player arg = yes
+[OK] arg is_alive = true | nil | nil
+[OK] arg is_on_ground = true | nil | nil
+[OK] arg get_velocity = -363.7 -35.7 0.0 | nil | nil
+--- LOCAL PLAYER F ---
+local_player = nil
+[OK] cmd:get_buttons = 8 | nil | nil
+[OK] cmd:get_viewangles = 14.0 -162.3 0.0 | nil | nil
+[OK] cmd:get_forwardmove = 450.0 | nil | nil
+[OK] cmd:get_sidemove = 0.0 | nil | nil
+[OK] netchan_ptr = 1319436544 | nil | nil
+========== END F DUMP ==========
