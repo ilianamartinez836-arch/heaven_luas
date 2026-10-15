@@ -1,0 +1,214 @@
+-- FPS Boost Script - Ported to new API
+local original_cvars = {}
+
+-- Helper functions for setting CVars with original value tracking
+local function SetI(name, value)
+    local cvar_ptr = cvar.find(name)
+    if cvar_ptr ~= 0 then
+        if original_cvars[name] == nil then
+            original_cvars[name] = { type = "int", val = cvar.get_int(cvar_ptr) }
+        end
+        cvar.set_int(cvar_ptr, value)
+    end
+end
+
+local function SetF(name, value)
+    local cvar_ptr = cvar.find(name)
+    if cvar_ptr ~= 0 then
+        if original_cvars[name] == nil then
+            original_cvars[name] = { type = "float", val = cvar.get_float(cvar_ptr) }
+        end
+        cvar.set_float(cvar_ptr, value)
+    end
+end
+
+local function SetS(name, value)
+    local cvar_ptr = cvar.find(name)
+    if cvar_ptr ~= 0 then
+        if original_cvars[name] == nil then
+            original_cvars[name] = { type = "string", val = cvar.get_string(cvar_ptr) }
+        end
+        cvar.set_string(cvar_ptr, value)
+    end
+end
+
+-- Cache for volatile CVars
+local _cv_picmip = nil
+
+local function EnforceVolatile()
+    if _cv_picmip == nil then
+        _cv_picmip = cvar.find("mat_picmip")
+    end
+    
+    if _cv_picmip ~= 0 then
+        local current_value = cvar.get_int(_cv_picmip)
+        if current_value ~= 4 then
+            SetI("mat_picmip", 4)
+        end
+    end
+end
+
+local function ApplyFPSBoost()
+    -- Core cheats
+    SetI("sv_cheats", 1)
+    SetI("sv_consistency", 0)
+
+    -- Texture quality settings
+    SetI("mat_picmip", 4)
+    SetI("mat_filtertextures", 0)
+    SetI("mat_filterlightmaps", 0)
+    SetI("mat_mipmaptextures", 1)
+    SetI("mat_compressedtextures", 1)
+    SetI("mat_reducefillrate", 1)
+    SetI("mat_antialias", 0)
+    SetI("mat_forceaniso", 0)
+    SetI("mat_bumpmap", 0)
+    SetI("mat_fastnobump", 1)
+    SetI("mat_specular", 0)
+    SetI("mat_fastspecular", 1)
+    SetI("mat_phong", 0)
+
+    -- LOD settings
+    SetI("r_rootlod", 1)
+    SetI("r_lod", 1)
+    SetI("r_staticprop_lod", 1)
+
+    -- Threading settings
+    SetI("cl_threaded_client_leaf_system", 0)
+    SetI("r_threaded_client_shadow_manager", 0)
+    SetI("r_threaded_particles", 0)
+
+    -- Visual effects
+    SetI("mat_hdr_level", 2)
+    SetI("mat_disable_bloom", 1)
+    SetI("mat_bloom_scalefactor_scalar", 0)
+    SetI("mat_colorcorrection", 0)
+    SetI("mat_motion_blur_enabled", 0)
+    SetI("r_shadowrendertotexture", 0)
+    SetI("r_flashlightdepthtexture", 0)
+    SetI("r_ambientboost", 0)
+    SetI("r_rimlight", 0)
+    SetI("r_3dsky", 1)
+
+    -- Water settings
+    SetI("r_waterdrawreflection", 0)
+    SetI("r_waterdrawrefraction", 0)
+    SetI("r_waterforceexpensive", 0)
+    SetI("r_waterforcereflectentities", 0)
+
+    -- Decals
+    SetI("r_decals", 0)
+    SetI("mp_decals", 0)
+    SetI("r_drawmodeldecals", 0)
+    SetI("r_queued_decals", 0)
+    SetI("r_decal_cullsize", 15)
+    SetI("cl_playerspraydisable", 1)
+    SetI("r_spray_lifetime", 0)
+
+    -- Props and particles
+    SetI("props_break_max_pieces", 0)
+    SetI("r_drawflecks", 0)
+    SetI("cl_show_splashes", 0)
+    SetI("r_renderoverlayfragment", 1)
+
+    -- Detail props
+    SetI("r_drawdetailprops", 0)
+    SetI("cl_detaildist", 0)
+    SetI("cl_detailfade", 0)
+    SetI("cl_detail_avoid_force", 0)
+    SetI("cl_detail_avoid_recover_speed", 0)
+    SetI("cl_detail_max_sway", 0)
+
+    -- Rope settings
+    SetI("r_ropetranslucent", 0)
+    SetI("rope_smooth", 0)
+    SetI("rope_subdiv", 0)
+    SetI("rope_averagelight", 0)
+    SetI("rope_collide", 0)
+    SetI("rope_rendersolid", 0)
+    SetI("rope_shake", 0)
+    SetI("rope_wind_dist", 0)
+    SetI("r_queued_ropes", 1)
+
+    -- Ragdolls and physics
+    SetI("cl_ragdoll_limit", 0)
+    SetI("cl_ragdoll_collide", 0)
+    SetI("cl_phys_props_enable", 0)
+    SetI("cl_phys_props_max", 0)
+    SetI("g_ragdoll_fadespeed", 9999)
+    SetI("g_ragdoll_lvfadespeed", 9999)
+
+    -- Performance settings
+    SetI("fps_max", 0)
+    SetI("mat_vsync", 0)
+    SetI("r_fastzreject", -1)
+    SetI("r_occlusion", 1)
+    SetI("cl_forcepreload", 1)
+    SetI("sv_forcepreload", 1)
+    SetI("cl_allowdownload", 0)
+    SetI("cl_allowupload", 0)
+    SetS("cl_downloadfilter", "none")
+    SetI("dsp_slow_cpu", 1)
+    SetI("cl_ejectbrass", 0)
+    SetI("violence_hblood", 0)
+    SetI("violence_ablood", 0)
+    SetI("violence_hgibs", 0)
+    SetI("violence_agibs", 0)
+
+    -- Extreme settings (commented out)
+    -- SetI("r_drawviewmodel", 0)
+    -- SetI("cl_drawhud", 0)
+    -- SetI("r_drawparticles", 0)
+    -- SetI("r_drawsprites", 0)
+    -- SetF("mat_viewportscale", 0.75)
+    -- SetI("r_drawstaticprops", 0)
+    -- SetI("r_flex", 0)
+    -- SetI("r_eyes", 0)
+    -- SetI("r_teeth", 0)
+    -- SetI("mat_queue_mode", -1)
+    -- SetI("cl_threaded_bone_setup", 0)
+    -- SetI("r_threaded_renderables", 0)
+    -- SetI("r_queued_post_processing", 0)
+    -- SetI("studio_queue_mode", 0)
+
+    client.print("FPS boost applied!")
+end
+
+function on_create_move(cmd)
+    EnforceVolatile()
+end
+
+function on_level_init_pre(mapname)
+    _cv_picmip = nil
+    ApplyFPSBoost()
+end
+
+-- Apply FPS boost on script load
+ApplyFPSBoost()
+client.print("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⠤⢲⣦⡀⠀⣠⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀")
+client.print("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣀⣠⠖⠚⠓⠒⠒⠲⠿⣍⣛⣻⣦⣷⢠⣻⣀⠤⠤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀")
+client.print("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⠔⡿⠓⠲⠬⢥⡤⠤⠤⠤⠤⣤⣀⣀⣈⣻⣿⣿⠓⠉⣀⡤⠔⢶⣻⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀")
+client.print("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣤⢤⠞⠁⣼⠀⠀⠀⠀⠀⠰⠶⢌⣽⡶⠟⢏⡁⢈⣉⣭⣷⡯⣝⠒⢦⣄⠙⠷⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀")
+client.print("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡾⣵⠿⣳⡟⠉⠉⠿⠀⠀⡀⠀⠀⣀⣀⣢⣾⣿⡚⠓⠒⠒⠒⠻⢿⣟⣧⡀⢠⣢⡻⠙⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀")
+client.print("FPS OPTIMIZER BY NATSUMI/AIKA -- mat_picmip = 1 (Normal) mat_picmip = 4 (Potato)")
+
+-- Restore original values on unload
+function on_unload()
+    local restored_count = 0
+
+    for name, data in pairs(original_cvars) do
+        local cvar_ptr = cvar.find(name)
+        if cvar_ptr ~= 0 then
+            if data.type == "int" then
+                cvar.set_int(cvar_ptr, data.val)
+            elseif data.type == "float" then
+                cvar.set_float(cvar_ptr, data.val)
+            elseif data.type == "string" then
+                cvar.set_string(cvar_ptr, data.val)
+            end
+            restored_count = restored_count + 1
+        end
+    end
+
+    client.print(string.format("FPS boost disabled. Successfully restored %d original CVars.", restored_count))
+end
