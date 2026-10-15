@@ -1,0 +1,1625 @@
+
+
+===== FILE: Auto charger level.lua =====
+
+-- ============================================================================
+-- L4D2 AUTOMATED CHARGER LEVELING ENGINE (ENGINE-SYNCED NETCODE)
+-- ============================================================================
+
+if client.get_shared_bool("autocut_enabled", nil) == nil then
+    client.set_shared_bool("autocut_enabled", false)
+    client.set_shared_bool("autocut_should_attack", false)
+    
+    -- Melee structural settings
+    client.set_shared_float("autocut_base_delay", 0.15)   -- Melee attack trace windup constant (e.g., Fireaxe/Machete)
+    client.set_shared_float("autocut_tongue_speed", 500.0) -- Base Charger movement speed profile (units per second)
+    
+    client.set_shared_float("autocut_last_attack_time", 0.0)
+    client.set_shared_int("autocut_smoker_index", -1)
+    client.set_shared_bool("autocut_debug", false)
+end
+
+function on_game_event(event_name, event)
+    if not event then return end
+    
+    -- Detect when a Charger initiates its charge trajectory sequence
+    if event_name == "ability_use" then
+        local ability = event:get_string("ability")
+        
+        if ability == "ability_charge" then
+            local enabled = client.get_shared_bool("autocut_enabled", false)
+            if enabled then
+                local user_id = event:get_int("userid")
+                local charger_index = engine.get_player_for_userid(user_id)
+                local gv = get_global_vars()
+                
+                client.set_shared_bool("autocut_should_attack", true)
+                client.set_shared_int("autocut_smoker_index", charger_index) -- Maintain shared name slot for system safety
+                
+                if gv then
+                    client.set_shared_float("autocut_last_attack_time", gv.curtime)
+                end
+                
+                if client.get_shared_bool("autocut_debug", false) then
+                    chat.print("[AutoLevel] Charger rush detected! Index: " .. charger_index, 0)
+                end
+            end
+        end
+    end
+end
+
+function on_create_move_prediction(cmd, local_player)
+    if not cmd or not local_player then return end
+    if not local_player:is_alive() then return end
+    if not engine.is_in_game() then return end
+    if local_player:get_team() ~= 2 then return end
+    
+    local enabled = client.get_shared_bool("autocut_enabled", false)
+    if not enabled then return end
+    
+    local should_attack = client.get_shared_bool("autocut_should_attack", false)
+    
+    if should_attack then
+        local gv = get_global_vars()
+        if not gv then return end
+        
+        local current_time = gv.curtime
+        local last_attack_time = client.get_shared_float("autocut_last_attack_time", 0.0)
+        
+        local swing_delay = client.get_shared_float("autocut_base_delay", 0.15)
+        local charger_speed = client.get_shared_float("autocut_tongue_speed", 500.0)
+        
+        local calculated_delay = 0.1
+        local charger_index = client.get_shared_int("autocut_smoker_index", -1)
+        local distance = 0
+        local time_since_event = current_time - last_attack_time
+
+        if time_since_event > 5.0 or time_since_event < 0 then
+             client.set_shared_bool("autocut_should_attack", false)
+             return
+        end
+        
+        if charger_index > 0 then
+            local charger = entity.get_by_index(charger_index)
+            if charger and charger:is_alive() then
+                local eye_pos = local_player:get_eye_position()
+                local charger_pos = charger:get_origin()
+                distance = vector.distance(eye_pos, charger_pos)
+                
+                -- --- ADVANCED ENGINE LATEST PING COMPENSATION MATRIX ---
+                local outgoing_latency = 0.0
+                local incoming_latency = 0.0
+                
+                -- Interrogate the network engine channel directly for real-time traffic speeds
+                local net_channel = engine.get_net_channel_info()
+                if net_channel then
+                    outgoing_latency = net_channel:get_latency(0) -- Outbound transmission travel time
+                    incoming_latency = net_channel:get_latency(1) -- Inbound transmission travel time
+                end
+                
+                -- Extract active client lerp buffer setting (cl_interp default fallback is 0.06s)
+                local current_lerp = client.get_cvar_float("cl_interp") or 0.060
+                
+                -- Total network delay timeline footprint
+                local total_network_latency = outgoing_latency + incoming_latency + current_lerp
+                
+                -- Total required timeline compensation window (Weapon Windup + Total Network Latency)
+                local continuous_delay_target = swing_delay + total_network_latency
+                
+                -- Quantize timeline window to synchronize perfectly with server tick boundaries
+                local tick_interval = gv.interval_per_tick or 0.01
+                local quantized_ticks = math.floor((continuous_delay_target / tick_interval) + 0.5)
+                local exact_engine_latency_compensation = quantized_ticks * tick_interval
+                
+                -- Determine physical distance to strike window threshold (100 units max melee reach)
+                local distance_to_strike_zone = distance - 100.0
+                if distance_to_strike_zone = calculated_delay then
+            local current_buttons = cmd:get_buttons()
+            cmd:set_buttons(current_buttons | buttons.IN_ATTACK)
+            
+            client.set_shared_bool("autocut_should_attack", false)
+            client.set_shared_int("autocut_smoker_index", -1)
+            
+            if client.get_shared_bool("autocut_debug", false) then
+                chat.print("[AutoLevel] LEVEL SWING EXECUTED AT " .. string.format("%.3f", time_since_event), 0)
+            end
+        end
+    end
+end
+
+-- --- MENU INTERFACE LAYOUT STRUCTURE ---
+menu.add_sub_tab("Aimbot", "Auto Level Charger", function()
+    local changed, new_val
+    
+    imgui.separator()
+    imgui.text_colored(1.0, 0.4, 0.4, 1.0, "Auto Level: Engine Prediction Mode")
+    imgui.separator()
+    
+    changed, new_val = imgui.checkbox("Enable Auto Level", client.get_shared_bool("autocut_enabled", false))
+    if changed then client.set_shared_bool("autocut_enabled", new_val) end
+    
+    changed, new_val = imgui.checkbox("Debug Engine Metrics", client.get_shared_bool("autocut_debug", false))
+    if changed then client.set_shared_bool("autocut_debug", new_val) end
+    
+    imgui.spacing()
+    imgui.text_colored(0.7, 0.7, 1.0, 1.0, "Physical Velocity & Animation Configurations")
+    imgui.separator()
+    
+    changed, new_val = imgui.slider_float("Weapon Swing Windup (s)", client.get_shared_float("autocut_base_delay", 0.15), 0.0, 0.5)
+    if changed then client.set_shared_float("autocut_base_delay", new_val) end
+
+    changed, new_val = imgui.slider_float("Charger Speed (u/s)", client.get_shared_float("autocut_tongue_speed", 500.0), 300.0, 1000.0)
+    if changed then client.set_shared_float("autocut_tongue_speed", new_val) end
+    
+    imgui.spacing()
+    imgui.separator()
+    
+    imgui.text_colored(0.5, 0.5, 0.5, 1.0, "Engine Realtime Latency Diagnostics:")
+    
+    local net_channel = engine.get_net_channel_info()
+    local out_p = net_channel and net_channel:get_latency(0) or 0.0
+    local in_p = net_channel and net_channel:get_latency(1) or 0.0
+    local lrp = client.get_cvar_float("cl_interp") or 0.060
+    
+    imgui.text_colored(0.7, 0.7, 0.7, 1.0, string.format("Outbound Latency (Ping): %.1f ms", out_p * 1000))
+    imgui.text_colored(0.7, 0.7, 0.7, 1.0, string.format("Inbound Latency (Ping):  %.1f ms", in_p * 1000))
+    imgui.text_colored(0.7, 0.7, 0.7, 1.0, string.format("Client Interpolation:    %.1f ms", lrp * 1000))
+    
+    imgui.spacing()
+    imgui.text("Engine namespace automatically manages your network delay offsets dynamically.")
+end)
+
+
+===== FILE: Tracer with rainbow setting.lua =====
+
+-- ============================================================
+--  Advanced 3D Impacts Script  |  HeavenHook / L4D2
+--  Settings are saved to impacts_config.txt next to this file.                OG version made by by AddOutSeqNr
+--  Config auto-loads on startup and auto-saves on every change.
+-- ============================================================
+
+local MODES = { "Local", "Enemy", "Team" }
+local mode_idx = 0 
+
+local function create_default_cfg(is_local)
+    return {
+        enabled          = is_local, 
+        tracer_enabled   = true,
+        tracer_style     = 4,
+        tracer_duration  = 1.5,
+        tracer_thickness = 2.5,
+        tracer_r         = is_local and 0.2 or 1.0,
+        tracer_g         = is_local and 0.8 or 0.2,
+        tracer_b         = is_local and 1.0 or 0.2,
+        tracer_a         = 1.0,
+        tracer_rainbow   = false,
+        tracer_rspeed    = 2.0,
+
+        effect_style     = 1,
+        effect_size      = 24.0,
+        effect_duration  = 1.5,
+        effect_r         = is_local and 0.2 or 1.0,
+        effect_g         = is_local and 0.8 or 0.2,
+        effect_b         = is_local and 1.0 or 0.2,
+        effect_a         = 1.0,
+        effect_rainbow   = false,
+        effect_rspeed    = 2.0,
+    }
+end
+
+local cfg = {
+    ["Local"] = create_default_cfg(true),
+    ["Enemy"] = create_default_cfg(false),
+    ["Team"]  = create_default_cfg(false),
+}
+
+local global_cfg = {
+    fade_style  = 0,
+    max_impacts = 128,
+}
+
+-- ──────────────────────────────────────────────────────────────
+--  CONFIG SAVE / LOAD SYSTEM
+-- ──────────────────────────────────────────────────────────────
+
+local CONFIG_PATH = "impacts_config.txt"
+
+local function serialize_value(val, indent)
+    indent = indent or ""
+    local t = type(val)
+    if t == "string" then
+        return string.format("%q", val)
+    elseif t == "boolean" or t == "number" then
+        return tostring(val)
+    elseif t == "table" then
+        local parts = {}
+        for k, v in pairs(val) do
+            local key_str
+            if type(k) == "string" then
+                key_str = string.format("[%q]", k)
+            else
+                key_str = string.format("[%s]", tostring(k))
+            end
+            local val_str = serialize_value(v, indent .. "  ")
+            if val_str then
+                table.insert(parts, string.format("%s  %s = %s", indent, key_str, val_str))
+            end
+        end
+        return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
+    end
+    return nil
+end
+
+local function save_config()
+    local ok, file = pcall(io.open, CONFIG_PATH, "w")
+    if not ok or not file then return end
+
+    local data = {
+        cfg = cfg,
+        global_cfg = global_cfg
+    }
+
+    local content = "return " .. serialize_value(data) .. "\n"
+    file:write(content)
+    file:close()
+end
+
+local function load_config()
+    local ok, file = pcall(io.open, CONFIG_PATH, "r")
+    if not ok or not file then return end
+
+    local content = file:read("*a")
+    file:close()
+
+    local chunk, err = load(content)
+    if not chunk then return end
+
+    local success, loaded_data = pcall(chunk)
+    if not success or type(loaded_data) ~= "table" then return end
+
+    if loaded_data.global_cfg then
+        for k, v in pairs(loaded_data.global_cfg) do
+            global_cfg[k] = v
+        end
+    end
+
+    if loaded_data.cfg then
+        for mode, mode_cfg in pairs(loaded_data.cfg) do
+            if cfg[mode] then
+                for k, v in pairs(mode_cfg) do
+                    cfg[mode][k] = v
+                end
+                
+                -- SAFETY FALLBACK: If old config is missing rainbow settings, inject them so the script doesn't crash
+                if cfg[mode].tracer_rainbow == nil then cfg[mode].tracer_rainbow = false end
+                if cfg[mode].tracer_rspeed == nil then cfg[mode].tracer_rspeed = 2.0 end
+                if cfg[mode].effect_rainbow == nil then cfg[mode].effect_rainbow = false end
+                if cfg[mode].effect_rspeed == nil then cfg[mode].effect_rspeed = 2.0 end
+            end
+        end
+    end
+end
+
+load_config()
+
+-- ──────────────────────────────────────────────────────────────
+--  IMPACT DRAWING & HELPERS
+-- ──────────────────────────────────────────────────────────────
+
+local impacts = {}
+local TRACER_STYLES = { "Line", "Beam", "Dashed", "Electric", "Rail" }
+local EFFECT_STYLES = { "None", "Ring", "Cross", "Dot", "Splash", "Shockwave" }
+local FADE_STYLES   = { "Quadratic", "Linear", "Hold + Drop" }
+
+
+local function get_screen_coords(world_pos)
+    if not engine.world_to_screen_matrix then return nil end
+
+    local mat_ptr = engine.world_to_screen_matrix()
+    if not mat_ptr or mat_ptr == 0 then return nil end
+
+    local function read_mat(idx)
+        return memory.read_float(mat_ptr + (idx * 4))
+    end
+
+    local ok, m00 = pcall(read_mat, 0)
+    if not ok then return nil end
+    local m01 = read_mat(1); local m02 = read_mat(2); local m03 = read_mat(3)
+    local m10 = read_mat(4); local m11 = read_mat(5); local m12 = read_mat(6); local m13 = read_mat(7)
+    local m30 = read_mat(12); local m31 = read_mat(13); local m32 = read_mat(14); local m33 = read_mat(15)
+
+    local w = m30 * world_pos.x + m31 * world_pos.y + m32 * world_pos.z + m33
+    if w < 0.001 then return nil end 
+
+    local inv_w = 1.0 / w
+    local screen_x = (m00 * world_pos.x + m01 * world_pos.y + m02 * world_pos.z + m03) * inv_w
+    local screen_y = (m10 * world_pos.x + m11 * world_pos.y + m12 * world_pos.z + m13) * inv_w
+
+    local width, height = engine.get_screen_size()
+    local x = (width / 2) + (screen_x * width / 2)
+    local y = (height / 2) - (screen_y * height / 2)
+
+    return { x = math.floor(x), y = math.floor(y) }
+end
+
+local function compute_fade(elapsed, duration)
+    local t = math.max(0, math.min(1, 1 - elapsed / duration))
+    if global_cfg.fade_style == 0 then return t * t end
+    if global_cfg.fade_style == 1 then return t      end
+    return t > 0.3 and 1.0 or (t / 0.3)
+end
+
+local function drand(seed, i)
+    local v = math.sin(seed * 127.1 + i * 311.7) * 43758.5453
+    return v - math.floor(v)
+end
+
+-- Rainbow Color Generator
+local function get_rainbow_color(speed)
+    local s = speed or 2.0
+    local time = os.clock() * s
+    local r = (math.sin(time) * 0.5) + 0.5
+    local g = (math.sin(time + 2.09439) * 0.5) + 0.5 -- 120 deg offset
+    local b = (math.sin(time + 4.18879) * 0.5) + 0.5 -- 240 deg offset
+    return r, g, b
+end
+
+local function safe_line(x1, y1, x2, y2, r, g, b, a)
+    pcall(function() draw.line(math.floor(x1), math.floor(y1), math.floor(x2), math.floor(y2), r, g, b, a) end)
+end
+local function safe_circle(x, y, rad, segs, r, g, b, a)
+    pcall(function() draw.circle(math.floor(x), math.floor(y), rad, segs, r, g, b, a) end)
+end
+local function safe_outlined_circle(x, y, rad, segs, r, g, b, a)
+    pcall(function() draw.outlined_circle(math.floor(x), math.floor(y), rad, segs, r, g, b, a) end)
+end
+
+local function safe_thick_line(x1, y1, x2, y2, r, g, b, a, thickness)
+    if thickness <= 1.0 then safe_line(x1, y1, x2, y2, r, g, b, a); return end
+    local dx = x2 - x1; local dy = y2 - y1
+    local len = math.sqrt(dx*dx + dy*dy)
+    if len == 0 then return end
+    local px = -dy / len; local py = dx / len
+    local half = thickness / 2
+    for i = -half, half, 0.5 do
+        safe_line(x1 + px * i, y1 + py * i, x2 + px * i, y2 + py * i, r, g, b, a)
+    end
+end
+
+local function draw_tracer(ox, oy, dx, dy, elapsed, seed, c)
+    local s = c.tracer_style
+    local r, g, b = c.tracer_r, c.tracer_g, c.tracer_b
+    
+    if c.tracer_rainbow then
+        r, g, b = get_rainbow_color(c.tracer_rspeed)
+    end
+
+    local a  = compute_fade(elapsed, c.tracer_duration) * c.tracer_a
+    local th = c.tracer_thickness
+
+    if s == 0 then
+        safe_thick_line(ox, oy, dx, dy, r, g, b, a, th)
+    elseif s == 1 then
+        safe_thick_line(ox, oy, dx, dy, r, g, b, a * 0.15, th * 2.5)
+        safe_thick_line(ox, oy, dx, dy, r, g, b, a * 0.40, th * 1.5)
+        safe_thick_line(ox, oy, dx, dy, r, g, b, a, th)
+    elseif s == 2 then
+        local segs = 14
+        for i = 0, segs - 1, 2 do
+            local t0 = i / segs; local t1 = (i + 0.65) / segs
+            safe_thick_line(ox + (dx-ox)*t0, oy + (dy-oy)*t0, ox + (dx-ox)*t1, oy + (dy-oy)*t1, r, g, b, a, th)
+        end
+    elseif s == 3 then
+        local segs = 10
+        local px = -(dy - oy); local py = (dx - ox)
+        local plen = math.sqrt(px*px + py*py)
+        if plen > 0 then px = px/plen; py = py/plen end
+        local prev_x, prev_y = ox, oy
+        for i = 1, segs do
+            local t  = i / segs
+            local mx = ox + (dx-ox)*t; local my = oy + (dy-oy)*t
+            if i < segs then
+                local off = (drand(seed, i) - 0.5) * 18
+                mx = mx + px*off; my = my + py*off
+            end
+            safe_thick_line(prev_x, prev_y, mx, my, r, g, b, a, th)
+            prev_x, prev_y = mx, my
+        end
+    elseif s == 4 then
+        safe_thick_line(ox, oy, dx, dy, r, g, b, a * 0.20, th * 3.5)
+        safe_thick_line(ox, oy, dx, dy, r, g, b, a * 0.60, th * 1.5)
+        safe_thick_line(ox, oy, dx, dy, 1, 1, 1, a, th * 0.5)
+    end
+end
+
+local function draw_effect(dx, dy, elapsed, c)
+    local s = c.effect_style
+    if s == 0 then return end
+    
+    local r, g, b = c.effect_r, c.effect_g, c.effect_b
+    if c.effect_rainbow then
+        r, g, b = get_rainbow_color(c.effect_rspeed)
+    end
+
+    local a   = compute_fade(elapsed, c.effect_duration) * c.effect_a
+    local sz  = c.effect_size
+    local pct = elapsed / c.effect_duration
+
+    if s == 1 then
+        safe_outlined_circle(dx, dy, sz * pct, 32, r, g, b, a)
+    elseif s == 2 then
+        local h = sz * 0.5
+        safe_line(dx-h, dy-h, dx+h, dy+h, r, g, b, a)
+        safe_line(dx+h, dy-h, dx-h, dy+h, r, g, b, a)
+    elseif s == 3 then
+        local rad = math.max(1, sz * 0.35 * (1 - pct))
+        safe_circle(dx, dy, rad, 20, r, g, b, a)
+    elseif s == 4 then
+        local len = sz * pct
+        for i = 0, 7 do
+            local angle = (i / 8) * math.pi * 2
+            safe_line(dx + math.cos(angle)*len*0.25, dy + math.sin(angle)*len*0.25, dx + math.cos(angle)*len, dy + math.sin(angle)*len, r, g, b, a)
+        end
+    elseif s == 5 then
+        local outer = sz * pct
+        safe_outlined_circle(dx, dy, outer, 48, r, g, b, a)
+        safe_outlined_circle(dx, dy, outer * 0.6, 32, r, g, b, a * 0.4)
+        if pct < 0.4 then safe_circle(dx, dy, sz*0.15, 16, 1, 1, 1, a*(1-pct/0.4)) end
+    end
+end
+
+
+events.register("bullet_impact")
+
+function on_game_event(name, event)
+    if name == "bullet_impact" then
+        local local_player = client.get_local_player()
+        if not local_player then return end
+        
+        local userid = event:get_int("userid")
+        local player_idx = engine.get_player_for_userid(userid)
+        if not player_idx or player_idx == 0 then return end
+        
+        local mode = "None"
+        if player_idx == local_player:get_index() then
+            mode = "Local"
+        else
+            local shooter = entity.get_by_index(player_idx)
+            if shooter then
+                if shooter:get_team() == local_player:get_team() then
+                    mode = "Team"
+                else
+                    mode = "Enemy"
+                end
+            end
+        end
+
+        if mode ~= "None" and cfg[mode].enabled then
+            if #impacts >= global_cfg.max_impacts then table.remove(impacts, 1) end
+            
+            local start_pos
+            if mode == "Local" then
+                local eye_pos = local_player:get_eye_position()
+                local angles  = engine.get_view_angles()
+                local fwd, right, up = utils.angle_vectors(angles)
+                start_pos = vector.new(
+                    eye_pos.x + (fwd.x * 30) + (right.x * 8) - (up.x * 10),
+                    eye_pos.y + (fwd.y * 30) + (right.y * 8) - (up.y * 10),
+                    eye_pos.z + (fwd.z * 30) + (right.z * 8) - (up.z * 10)
+                )
+            else
+                local shooter = entity.get_by_index(player_idx)
+                start_pos = shooter:get_eye_position()
+            end
+
+            if start_pos then
+                table.insert(impacts, {
+                    target_pos = vector.new(event:get_float("x"), event:get_float("y"), event:get_float("z")),
+                    start_pos  = start_pos,
+                    time       = os.clock(),
+                    seed       = math.random(1, 9999),
+                    mode       = mode
+                })
+            end
+        end
+    end
+end
+
+
+function on_paint()
+    if not engine.is_in_game() then return end
+    if #impacts == 0 then return end
+
+    local now = os.clock()
+
+    for i = #impacts, 1, -1 do
+        local impact  = impacts[i]
+        local elapsed = now - impact.time
+        local c       = cfg[impact.mode]
+
+        local max_life = math.max(c.tracer_duration, c.effect_duration)
+
+        if elapsed > max_life or not c.enabled then
+            table.remove(impacts, i)
+        else
+            local target_2d = get_screen_coords(impact.target_pos)
+            local start_2d  = get_screen_coords(impact.start_pos)
+            
+            if target_2d and start_2d then
+                if c.tracer_enabled and elapsed < c.tracer_duration then
+                    draw_tracer(start_2d.x, start_2d.y, target_2d.x, target_2d.y, elapsed, impact.seed, c)
+                end
+
+                if c.effect_style > 0 and elapsed < c.effect_duration then
+                    draw_effect(target_2d.x, target_2d.y, elapsed, c)
+                end
+            end
+        end
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────
+--  AUTO-SAVE ON SHUTDOWN
+-- ──────────────────────────────────────────────────────────────
+
+pcall(function()
+    local _orig_shutdown = on_shutdown
+    on_shutdown = function()
+        save_config()
+        if _orig_shutdown then _orig_shutdown() end
+    end
+end)
+
+-- ──────────────────────────────────────────────────────────────
+--  MENU
+-- ──────────────────────────────────────────────────────────────
+
+menu.add_main_tab("Impacts", function()
+    imgui.text("Advanced 3D Impacts")
+    imgui.separator()
+    imgui.spacing()
+
+    local changed, val
+    changed, val = imgui.combo("Global Fade Curve", global_cfg.fade_style, FADE_STYLES)
+    if changed then
+        global_cfg.fade_style = val
+        save_config()
+    end
+
+    changed, val = imgui.slider_int("Global Max Impacts", global_cfg.max_impacts, 8, 256)
+    if changed then
+        global_cfg.max_impacts = val
+        save_config()
+    end
+
+    imgui.spacing()
+    imgui.separator()
+    imgui.spacing()
+
+    changed, val = imgui.combo("Target Mode (Edit)", mode_idx, MODES)
+    if changed then mode_idx = val end
+
+    local current_mode_str = MODES[mode_idx + 1]
+    local c = cfg[current_mode_str]
+
+    imgui.spacing()
+    changed, val = imgui.checkbox("Enable " .. current_mode_str .. " Impacts", c.enabled)
+    if changed then
+        c.enabled = val
+        save_config()
+    end
+
+    imgui.spacing()
+    if imgui.button("Save Config Now") then
+        save_config()
+    end
+
+    if not c.enabled then return end 
+    imgui.spacing()
+
+    -- Tracer Box (Height increased to 330 to fit everything cleanly)
+    if imgui.begin_child("TracerBox", 0, 330, true, 0) then
+        imgui.text("Tracer Settings (" .. current_mode_str .. ")")
+        imgui.separator()
+        
+        changed, val = imgui.checkbox("Show Tracer", c.tracer_enabled)
+        if changed then c.tracer_enabled = val; save_config() end
+        
+        changed, val = imgui.combo("Style##tr", c.tracer_style, TRACER_STYLES)
+        if changed then c.tracer_style = val; save_config() end
+        
+        changed, val = imgui.slider_float("Duration (s)##tr", c.tracer_duration, 0.05, 8.0)
+        if changed then c.tracer_duration = val; save_config() end
+
+        changed, val = imgui.slider_float("Thickness##tr", c.tracer_thickness, 1.0, 10.0)
+        if changed then c.tracer_thickness = val; save_config() end
+        
+        imgui.spacing()
+        imgui.text("Color (RGBA) & Rainbow:")
+        
+        changed, val = imgui.checkbox("Rainbow Mode##tr_rb", c.tracer_rainbow)
+        if changed then c.tracer_rainbow = val; save_config() end
+
+        changed, val = imgui.slider_float("Rainbow Speed##tr_rs", c.tracer_rspeed, 0.1, 10.0)
+        if changed then c.tracer_rspeed = val; save_config() end
+
+        changed, val = imgui.slider_float("R##tr", c.tracer_r, 0.0, 1.0)
+        if changed then c.tracer_r = val; save_config() end
+        
+        changed, val = imgui.slider_float("G##tg", c.tracer_g, 0.0, 1.0)
+        if changed then c.tracer_g = val; save_config() end
+        
+        changed, val = imgui.slider_float("B##tb", c.tracer_b, 0.0, 1.0)
+        if changed then c.tracer_b = val; save_config() end
+        
+        changed, val = imgui.slider_float("A##ta", c.tracer_a, 0.0, 1.0)
+        if changed then c.tracer_a = val; save_config() end
+
+        imgui.end_child()
+    end
+
+    imgui.spacing()
+
+    -- Effect Box (Height increased to 300 to fit everything cleanly)
+    if imgui.begin_child("EffectBox", 0, 300, true, 0) then
+        imgui.text("Impact Effect Settings (" .. current_mode_str .. ") ")
+        imgui.separator()
+
+        changed, val = imgui.combo("Effect##ef", c.effect_style, EFFECT_STYLES)
+        if changed then c.effect_style = val; save_config() end
+
+        changed, val = imgui.slider_float("Size##ef", c.effect_size, 4.0, 120.0)
+        if changed then c.effect_size = val; save_config() end
+
+        changed, val = imgui.slider_float("Duration (s)##ef", c.effect_duration, 0.05, 5.0)
+        if changed then c.effect_duration = val; save_config() end
+
+        imgui.spacing()
+        imgui.text("Color (RGBA) & Rainbow:")
+
+        changed, val = imgui.checkbox("Rainbow Mode##ef_rb", c.effect_rainbow)
+        if changed then c.effect_rainbow = val; save_config() end
+
+        changed, val = imgui.slider_float("Rainbow Speed##ef_rs", c.effect_rspeed, 0.1, 10.0)
+        if changed then c.effect_rspeed = val; save_config() end
+
+        changed, val = imgui.slider_float("R##er", c.effect_r, 0.0, 1.0)
+        if changed then c.effect_r = val; save_config() end
+        
+        changed, val = imgui.slider_float("G##eg", c.effect_g, 0.0, 1.0)
+        if changed then c.effect_g = val; save_config() end
+        
+        changed, val = imgui.slider_float("B##eb", c.effect_b, 0.0, 1.0)
+        if changed then c.effect_b = val; save_config() end
+        
+        changed, val = imgui.slider_float("A##ea", c.effect_a, 0.0, 1.0)
+        if changed then c.effect_a = val; save_config() end
+
+        imgui.end_child()
+    end
+end)
+
+===== FILE: YouKnowIknow (1).lua =====
+
+local chat_log = {}
+local MAX_CHAT_ENTRIES = 50
+local CHAT_DISPLAY_TIME = 15.0
+local last_cleanup = 0
+
+local config = {
+    show_team_prefix = true,
+    show_vote_messages = true,
+    show_chat_messages = true,
+    show_timestamps = true
+}
+
+local team_names = {
+    [0] = "Unknown",
+    [1] = "Spectator",
+    [2] = "Survivor",
+    [3] = "Infected"
+}
+
+local function get_team_prefix_colored(team_num)
+    if not config.show_team_prefix then
+        return "", 1, 1, 1, 1
+    end
+    
+    if team_num == 3 then
+        return "(Infected) ", 1.0, 0.3, 0.3, 1.0
+    elseif team_num == 2 then
+        return "(Survivor) ", 0.3, 0.8, 1.0, 1.0
+    elseif team_num == 1 then
+        return "(Spectator) ", 0.7, 0.7, 0.7, 1.0
+    else
+        return "(Unknown) ", 0.5, 0.5, 0.5, 1.0
+    end
+end
+
+local function get_timestamp()
+    if not config.show_timestamps then
+        return ""
+    end
+    return "[" .. os.date("%H:%M:%S") .. "] "
+end
+
+local function add_chat_message(player_name, team_num, message, is_vote)
+    local prefix, r, g, b, a = get_team_prefix_colored(team_num)
+    local timestamp = get_timestamp()
+    
+    local entry = {
+        timestamp = timestamp,
+        prefix = prefix,
+        player_name = player_name,
+        message = message,
+        team_color = {r, g, b, a},
+        is_vote = is_vote,
+        time_added = client.get_tick_count() / 66.0
+    }
+    
+    table.insert(chat_log, 1, entry)
+    
+    while #chat_log > MAX_CHAT_ENTRIES do
+        table.remove(chat_log)
+    end
+end
+
+local function get_player_team(entity_idx)
+    local player = entity.get_by_index(entity_idx)
+    if not player then return 0 end
+    return player:get_team()
+end
+
+local function on_player_say(event_name, event)
+    if not config.show_chat_messages then return end
+    
+    local user_id = event:get_int("userid")
+    local text = event:get_string("text")
+    local team_only = event:get_bool("teamonly")
+    local entity_idx = engine.get_player_for_userid(user_id)
+    
+    if entity_idx <= 0 then return end
+    
+    local local_player = client.get_local_player()
+    if not local_player then return end
+    
+    local local_idx = local_player:get_index()
+    local local_team = local_player:get_team()
+    
+    if entity_idx == local_idx then return end
+    
+    local player_info = engine.get_player_info(entity_idx)
+    if not player_info then return end
+    
+    local player_name = player_info.name
+    local team_num = get_player_team(entity_idx)
+    
+    if team_num == local_team then return end
+    
+    local final_message = text
+    if team_only then
+        final_message = "(TEAM) " .. text
+    end
+    
+    add_chat_message(player_name, team_num, final_message, false)
+end
+
+local function on_vote_cast(event_name, event)
+    if not config.show_vote_messages then return end
+    
+    local entity_id = event:get_int("entityid")
+    if entity_id <= 0 then return end
+    
+    local local_player = client.get_local_player()
+    if not local_player then return end
+    
+    local local_idx = local_player:get_index()
+    if entity_id == local_idx then return end
+    
+    local player_info = engine.get_player_info(entity_id)
+    if not player_info then return end
+    
+    local player_name = player_info.name
+    local team_num = get_player_team(entity_id)
+    
+    local vote_text = "Unknown"
+    if event_name == "vote_cast_yes" then
+        vote_text = "Yes"
+    elseif event_name == "vote_cast_no" then
+        vote_text = "No"
+    end
+    
+    local message = "Voted: " .. vote_text
+    add_chat_message(player_name, team_num, message, true)
+end
+
+local function render_chat_window()
+    imgui.begin("Enemy Chat & Votes", 0)
+    
+    imgui.text(string.format("Messages: %d", #chat_log))
+    
+    imgui.separator()
+    
+    local changed, new_val
+    
+ --   changed, new_val = imgui.checkbox("Show Team Prefix", config.show_team_prefix)
+    if changed then config.show_team_prefix = new_val end
+    
+    --changed, new_val = imgui.checkbox("Show Vote Messages", config.show_vote_messages)
+    if changed then config.show_vote_messages = new_val end
+    
+--    changed, new_val = imgui.checkbox("Show Chat Messages", config.show_chat_messages)
+    if changed then config.show_chat_messages = new_val end
+    
+--    changed, new_val = imgui.checkbox("Show Timestamps", config.show_timestamps)
+    if changed then config.show_timestamps = new_val end
+    
+    if imgui.button("Clear Chat") then
+        chat_log = {}
+    end
+    
+    imgui.separator()
+    
+    imgui.begin_child("chat_log", 0, 300, true, 0)
+    
+    local current_time = client.get_tick_count() / 66.0
+    
+    if #chat_log == 0 then
+        imgui.text("No messages yet...")
+    end
+    
+    for i = #chat_log, 1, -1 do
+        local entry = chat_log[i]
+        local age = current_time - entry.time_added
+        
+        local alpha = 1.0
+        if age > CHAT_DISPLAY_TIME then
+            alpha = math.max(0, 1.0 - ((age - CHAT_DISPLAY_TIME) / 2.0))
+            if alpha <= 0 then
+                goto continue
+            end
+        end
+        
+        local full_text = entry.timestamp .. entry.prefix .. entry.player_name .. ": " .. entry.message
+        local r, g, b, _ = table.unpack(entry.team_color)
+        
+        if entry.is_vote then
+            imgui.text_colored(1.0, 1.0, 0.3, alpha, full_text)
+        else
+            imgui.text_colored(r, g, b, alpha, full_text)
+        end
+        
+        ::continue::
+    end
+    
+    imgui.end_child()
+    imgui["end"]()
+end
+
+local function cleanup_old_messages()
+    local current_time = client.get_tick_count() / 66.0
+    
+    if current_time - last_cleanup < 5.0 then return end
+    last_cleanup = current_time
+    
+    local max_age = CHAT_DISPLAY_TIME + 2.0
+    
+    for i = #chat_log, 1, -1 do
+        local age = current_time - chat_log[i].time_added
+        if age > max_age then
+            table.remove(chat_log, i)
+        end
+    end
+end
+
+function on_game_event(event_name, event)
+    if event_name == "player_say" then
+        on_player_say(event_name, event)
+    elseif event_name == "vote_cast_yes" or event_name == "vote_cast_no" then
+        on_vote_cast(event_name, event)
+    end
+end
+
+function on_end_scene()
+    render_chat_window()
+    cleanup_old_messages()
+end
+
+events.register("player_say")
+events.register("vote_cast_yes")
+events.register("vote_cast_no")
+
+client.print("Enemy Chat & Votes loaded")
+
+
+===== FILE: aimware_AntiAim.lua =====
+
+local aa = {
+    spin_speed = 10,
+    jitter_range = 90,
+    spin_angle = 0.0,
+    tick_count = 0,
+}
+--this is just a lol anti aim btw
+--you can set send packet to false to cause desync
+-- but since this is made for hvh i have dediced to set it to true
+-- have that in mind pls
+if client.get_shared_bool("aa_enabled", nil) == nil then
+    client.set_shared_bool("aa_enabled", false)
+    client.set_shared_bool("aa_disable_on_ladder", true)
+    client.set_shared_bool("aa_disable_on_use", true)
+    client.set_shared_int("aa_pitch_mode", 0)
+    client.set_shared_int("aa_yaw_mode", 0)
+end
+
+local function normalize_angle(a)
+    while a > 180 do a = a - 360 end
+    while a < -180 do a = a + 360 end
+    return a
+end
+
+function on_create_move_prediction(cmd, local_player)
+    if not cmd or not local_player then
+        client.set_send_packet(true)
+        return
+    end
+
+    if not local_player:is_alive() then
+        aa.tick_count = 0
+        client.set_send_packet(true)
+        return
+    end
+
+    local enabled = client.get_shared_bool("aa_enabled", false)
+
+    if not enabled then
+        client.set_send_packet(true)
+        return
+    end
+
+    local disable_on_ladder = client.get_shared_bool("aa_disable_on_ladder", true)
+    local disable_on_use = client.get_shared_bool("aa_disable_on_use", true)
+    local pitch_mode = client.get_shared_int("aa_pitch_mode", 0)
+    local yaw_mode = client.get_shared_int("aa_yaw_mode", 0)
+
+    local IN_USE = 32
+    local IN_ATTACK = 1
+    local IN_ATTACK2 = 2048
+    local MOVETYPE_LADDER = 9
+
+    local buttons = cmd:get_buttons()
+
+    if disable_on_use and ((buttons & (IN_USE | IN_ATTACK | IN_ATTACK2)) ~= 0) then
+        client.set_send_packet(true)
+        return
+    end
+
+    if disable_on_ladder and local_player:get_move_type() == MOVETYPE_LADDER then
+        client.set_send_packet(true)
+        return
+    end
+
+    aa.tick_count = aa.tick_count + 1
+	local send_packet = true
+    if pitch_mode == 3 then
+        send_packet = (aa.tick_count % 2 == 0)
+    end
+    local angles = cmd:get_viewangles()
+
+	if pitch_mode ~= 0 then
+        if pitch_mode == 1 then
+            angles.x = 89.0
+        elseif pitch_mode == 2 then
+            angles.x = 89.0
+        elseif pitch_mode == 3 then
+    		angles.x = 2160.0 + 89.0 --Say thx nigger ;)
+        end
+    end
+
+    if yaw_mode ~= 0 then
+        local yaw_offset = 0.0
+        local jitter_offset = 0.0
+        local is_spin = false
+
+        if yaw_mode == 1 then
+            yaw_offset = 180.0
+        elseif yaw_mode == 2 then
+            yaw_offset = 90.0
+        elseif yaw_mode == 3 then
+            yaw_offset = -90.0
+        elseif yaw_mode == 4 then
+            is_spin = true
+        elseif yaw_mode == 5 then
+            yaw_offset = 180.0
+            jitter_offset = math.random() * aa.jitter_range - (aa.jitter_range / 2.0)
+        elseif yaw_mode == 6 then
+            yaw_offset = 0.0
+            jitter_offset = math.random() * aa.jitter_range - (aa.jitter_range / 2.0)
+        elseif yaw_mode == 7 then
+            local side = (aa.tick_count % 2 == 0) and 1 or -1
+            yaw_offset = side * 90.0
+            jitter_offset = math.random() * aa.jitter_range - (aa.jitter_range / 2.0)
+        end
+
+        if is_spin then
+            aa.spin_angle = normalize_angle(aa.spin_angle + aa.spin_speed)
+            angles.y = aa.spin_angle
+        else
+            angles.y = normalize_angle(angles.y + yaw_offset + jitter_offset)
+        end
+    end
+
+    client.set_send_packet(true)
+    cmd:set_viewangles(angles)
+end
+
+menu.add_main_tab("AntiAims", function()
+    imgui.text("Anti-Aim Test Harness (Aimware-inspired)")
+    imgui.separator()
+
+    local changed, val = imgui.checkbox("Enabled", client.get_shared_bool("aa_enabled", false))
+    if changed then client.set_shared_bool("aa_enabled", val) end
+
+    imgui.separator()
+    imgui.text("Advanced Section")
+    imgui.separator()
+
+    local changed, val = imgui.slider_int("Spinbot Speed", aa.spin_speed, 1, 20)
+    if changed then aa.spin_speed = val end
+
+    local changed, val = imgui.slider_int("Jitter Range", aa.jitter_range, 0, 180)
+    if changed then aa.jitter_range = val end
+
+    imgui.separator()
+
+    local pitch_items = {"OFF", "Emotion", "Down", "Fake down"}
+    local changed, idx = imgui.combo("Pitch", client.get_shared_int("aa_pitch_mode", 0), pitch_items)
+    if changed then client.set_shared_int("aa_pitch_mode", idx) end
+
+    imgui.separator()
+
+    local yaw_items = {"OFF", "Backward", "Sideways left", "Sideways right", "Spinbot", "Jitter Backward", "Jitter Forward", "Jitter sideways"}
+    local changed, idx = imgui.combo("Yaw", client.get_shared_int("aa_yaw_mode", 0), yaw_items)
+    if changed then client.set_shared_int("aa_yaw_mode", idx) end
+
+    imgui.separator()
+
+    local changed, val = imgui.checkbox("Disable on Ladder", client.get_shared_bool("aa_disable_on_ladder", true))
+    if changed then client.set_shared_bool("aa_disable_on_ladder", val) end
+
+    local changed, val = imgui.checkbox("Disable on Use", client.get_shared_bool("aa_disable_on_use", true))
+    if changed then client.set_shared_bool("aa_disable_on_use", val) end
+
+    imgui.separator()
+
+    imgui["end"]()
+end)
+
+
+
+
+
+
+
+===== FILE: aimware_Crosshar.lua =====
+
+function on_paint()
+
+    local sw, sh = draw.get_screen_size()
+    local cx, cy = math.floor(sw / 2), math.floor(sh / 2)
+    
+    local g, l = 2, 5
+    local r, g_col, b, a = 1, 0, 0, 1
+    local sr, sg, sb, sa = 0, 0, 0, 1
+
+    local function draw_x_arm(dx, dy)
+        local x1, y1 = cx + (dx * g), cy + (dy * g)
+        local x2, y2 = cx + (dx * (g + l)), cy + (dy * (g + l))
+
+        draw.line(x1 + 1, y1 + 1, x2 + 1, y2 + 1, sr, sg, sb, sa)
+        draw.line(x1, y1, x2, y2, r, g_col, b, a)
+        draw.line(x1 + 1, y1, x2 + 1, y2, r, g_col, b, a)
+    end
+
+    draw_x_arm(-1, -1)
+    draw_x_arm(1, -1)
+    draw_x_arm(-1, 1)
+    draw_x_arm(1, 1)
+end
+
+
+
+===== FILE: chat notifier kill.lua =====
+
+-- Kill Notifier
+-- Shows "YourName killed VictimName with weapon" in chat
+
+local config = {
+    enabled = true,
+    show_headshots = true,  -- Show (HEADSHOT) tag
+    show_weapon = true,     -- Show weapon used
+}
+
+-- Register events
+events.register("player_death")
+
+function on_game_event(event_name, event)
+    if not config.enabled then return end
+    if event_name ~= "player_death" then return end
+    
+    local me = client.get_local_player()
+    if not me then return end
+    
+    -- Get event data
+    local attacker_id = event:get_int("attacker")
+    local victim_id = event:get_int("userid")
+    local weapon = event:get_string("weapon")
+    local headshot = event:get_bool("headshot")
+    
+    -- Convert userid to entity index
+    local attacker_index = engine.get_player_for_userid(attacker_id)
+    local victim_index = engine.get_player_for_userid(victim_id)
+    
+    -- Check if I'm the attacker
+    if attacker_index ~= me:get_index() then return end
+    
+    -- Get player names
+    local attacker_info = engine.get_player_info(attacker_index)
+    local victim_info = engine.get_player_info(victim_index)
+    
+    if not attacker_info or not victim_info then return end
+    
+    local my_name = attacker_info.name
+    local victim_name = victim_info.name
+    
+    -- Build kill message
+    local message = my_name .. " killed " .. victim_name
+    
+    if config.show_weapon then
+        message = message .. " with " .. weapon
+    end
+    
+    if config.show_headshots and headshot then
+        message = message .. " (HEADSHOT)"
+    end
+    
+    -- Print to chat
+    chat.print(message)
+    
+    -- Also print to console
+    client.print("[KILL] " .. message)
+end
+
+-- Menu
+menu.add_main_tab("Kill Notifier", function()
+    imgui.text("Kill Notifier Settings")
+    imgui.separator()
+    
+    local changed, val = imgui.checkbox("Enable Kill Notifications", config.enabled)
+    if changed then
+        config.enabled = val
+    end
+    
+    imgui.spacing()
+    
+    changed, val = imgui.checkbox("Show Weapon", config.show_weapon)
+    if changed then
+        config.show_weapon = val
+    end
+    
+    changed, val = imgui.checkbox("Show Headshots", config.show_headshots)
+    if changed then
+        config.show_headshots = val
+    end
+    
+    imgui.spacing()
+    imgui.separator()
+    imgui.spacing()
+    
+    imgui.text("Example outputs:")
+    imgui.text("byx killed player with rifle_ak47")
+    imgui.text("byx killed player with rifle_ak47 (HEADSHOT)")
+    imgui.text("Rarita (mambaza) killed playeer with pistol")
+end)
+
+client.print("[Kill Notifier] Loaded!")
+client.print("[Kill Notifier] Will show your kills in chat")
+
+
+
+===== FILE: chokes exploits.lua =====
+
+-- Choke Exploit 1 + 2 (ByxStorm) → Heaven
+-- Mismo campo que Bleed (client_state+19024); C1 y C2 stackean value1+value2
+-- Restore netchan solo cuando AMBOS están off
+
+local cfg = {
+    c1_enabled = false,
+    c1_key     = keys.KEY_C,
+    c1_value   = 45,
+
+    c2_enabled = false,
+    c2_key     = keys.KEY_V,
+    c2_value   = 45,
+}
+
+local st = {
+    c1_prev = false,
+    c2_prev = false,
+    genuine_ack = 0,
+    genuine_choked = 0,
+    has_genuine = false,
+}
+
+local ENGINE_CS_OFF  = 4352236
+local CS_NETCHAN_OFF = 24
+local CS_CHOKED_OFF  = 19024
+local NC_ACK_OFF     = 16
+local NC_CHOKED_OFF  = 28
+
+local function get_cs()
+    local eng = modules.get_engine_base()
+    if not eng or eng == 0 then return 0 end
+    local ok, cs = pcall(memory.read_int, eng + ENGINE_CS_OFF)
+    if not ok or not cs or cs == 0 then return 0 end
+    return cs
+end
+
+local function get_nc(cs)
+    if cs == 0 then return 0 end
+    local ok, nc = pcall(memory.read_int, cs + CS_NETCHAN_OFF)
+    if ok and nc and nc ~= 0 then return nc end
+    local ok2, ptr = pcall(function() return engine.get_netchan_ptr() end)
+    if ok2 and ptr and ptr ~= 0 then return ptr end
+    return 0
+end
+
+local function ri(addr)
+    local ok, v = pcall(memory.read_int, addr)
+    return ok and v or nil
+end
+
+local function wi(addr, val)
+    pcall(memory.write_int, addr, val, false)
+end
+
+local function capture_genuine(nc)
+    if nc == 0 then return end
+    local ack = ri(nc + NC_ACK_OFF)
+    local ch  = ri(nc + NC_CHOKED_OFF)
+    if ack and ack ~= -1 then
+        st.genuine_ack = ack
+        st.genuine_choked = ch or 0
+        st.has_genuine = true
+    end
+end
+
+local function restore_netchan()
+    local cs = get_cs()
+    if cs == 0 then return end
+    local nc = get_nc(cs)
+    if nc == 0 or not st.has_genuine then return end
+    if ri(nc + NC_ACK_OFF) == -1 then
+        wi(nc + NC_ACK_OFF, st.genuine_ack)
+    end
+    if ri(nc + NC_CHOKED_OFF) == 255 then
+        wi(nc + NC_CHOKED_OFF, st.genuine_choked)
+    end
+end
+
+local function any_active()
+    return cfg.c1_enabled or cfg.c2_enabled
+end
+
+local function stacked_value()
+    local v = 0
+    if cfg.c1_enabled then v = v + cfg.c1_value end
+    if cfg.c2_enabled then v = v + cfg.c2_value end
+    return v
+end
+
+function on_cl_move_pre()
+    local d1 = input.is_key_down(cfg.c1_key)
+    if d1 and not st.c1_prev then
+        cfg.c1_enabled = not cfg.c1_enabled
+        if not any_active() then restore_netchan() end
+    end
+    st.c1_prev = d1
+
+    local d2 = input.is_key_down(cfg.c2_key)
+    if d2 and not st.c2_prev then
+        cfg.c2_enabled = not cfg.c2_enabled
+        if not any_active() then restore_netchan() end
+    end
+    st.c2_prev = d2
+
+    if not any_active() then return end
+    if not engine.is_in_game() then return end
+
+    local cs = get_cs()
+    if cs == 0 then return end
+    local nc = get_nc(cs)
+    capture_genuine(nc)
+
+    wi(cs + CS_CHOKED_OFF, stacked_value())
+
+    if nc ~= 0 then
+        wi(nc + NC_ACK_OFF, -1)
+        wi(nc + NC_CHOKED_OFF, 255)
+    end
+end
+
+function on_unload()
+    if any_active() then restore_netchan() end
+    cfg.c1_enabled = false
+    cfg.c2_enabled = false
+end
+
+client.print("[Choke] C=Choke1 V=Choke2 | stackean | restore si ambos off")
+
+
+===== FILE: chokes.lua =====
+
+local ffi = rawget(_G, "ffi")
+
+local KEY_NAMES = {
+    [keys.MOUSE1] = "MOUSE1", [keys.MOUSE2] = "MOUSE2", [keys.MOUSE3] = "MOUSE3",
+    [keys.MOUSE4] = "MOUSE4", [keys.MOUSE5] = "MOUSE5",
+    [keys.KEY_0] = "0", [keys.KEY_1] = "1", [keys.KEY_2] = "2", [keys.KEY_3] = "3",
+    [keys.KEY_4] = "4", [keys.KEY_5] = "5", [keys.KEY_6] = "6", [keys.KEY_7] = "7",
+    [keys.KEY_8] = "8", [keys.KEY_9] = "9",
+    [keys.KEY_A] = "A", [keys.KEY_B] = "B", [keys.KEY_C] = "C", [keys.KEY_D] = "D",
+    [keys.KEY_E] = "E", [keys.KEY_F] = "F", [keys.KEY_G] = "G", [keys.KEY_H] = "H",
+    [keys.KEY_I] = "I", [keys.KEY_J] = "J", [keys.KEY_K] = "K", [keys.KEY_L] = "L",
+    [keys.KEY_M] = "M", [keys.KEY_N] = "N", [keys.KEY_O] = "O", [keys.KEY_P] = "P",
+    [keys.KEY_Q] = "Q", [keys.KEY_R] = "R", [keys.KEY_S] = "S", [keys.KEY_T] = "T",
+    [keys.KEY_U] = "U", [keys.KEY_V] = "V", [keys.KEY_W] = "W", [keys.KEY_X] = "X",
+    [keys.KEY_Y] = "Y", [keys.KEY_Z] = "Z",
+    [keys.SPACE] = "SPACE", [keys.SHIFT] = "SHIFT", [keys.CTRL] = "CTRL", [keys.ALT] = "ALT",
+    [keys.TAB] = "TAB", [keys.ENTER] = "ENTER", [keys.BACKSPACE] = "BKSP",
+    [keys.ESCAPE] = "ESC", [keys.END] = "END",
+    [keys.LEFT] = "LEFT", [keys.RIGHT] = "RIGHT", [keys.UP] = "UP", [keys.DOWN] = "DOWN",
+}
+
+local waiting_for_key = false
+local keybind_target = nil
+local keybind_target_field = nil
+
+local function key_name(k)
+    if not k or k == 0 then return "NONE" end
+    return KEY_NAMES[k] or ("#" .. tostring(k))
+end
+
+local function keybind_button(label, store, field, default)
+    local cur = store[field] or default or 0
+    local name = (waiting_for_key and keybind_target == store and keybind_target_field == field)
+        and "..." or key_name(cur)
+    if imgui.button(name .. "##kb_" .. label) then
+        waiting_for_key = true
+        keybind_target = store
+        keybind_target_field = field
+    end
+    imgui.same_line()
+    imgui.text(label)
+end
+
+local function key_down(k)
+    if not k or k == 0 then return false end
+    return input.is_key_down(k)
+end
+
+local function rising_toggle(store, key_field, enabled_field, prev_field)
+    local k = store[key_field]
+    local down = key_down(k)
+    if down and not store[prev_field] then
+        store[enabled_field] = not store[enabled_field]
+    end
+    store[prev_field] = down
+end
+
+local ENGINE_CS_OFF = 4352236
+local CS_NETCHAN_OFF = 24
+local CS_CHOKED_OFF = 19024
+local NC_ACK_OFF = 16
+local NC_CHOKED_OFF = 28
+
+local net_snap = { has = false, ack = 0, choked = 0 }
+
+local function get_engine_base()
+    local ok, b = pcall(modules.get_engine_base)
+    if ok and b and b ~= 0 then return b end
+    return 0
+end
+
+local function read_i(addr)
+    local ok, v = pcall(memory.read_int, addr)
+    if ok and v then return v end
+    return nil
+end
+
+local function write_i(addr, val)
+    return pcall(memory.write_int, addr, val, false)
+end
+
+local function get_raw_clientstate()
+    local eb = get_engine_base()
+    if eb == 0 then return 0 end
+    local cs = read_i(eb + ENGINE_CS_OFF)
+    if not cs or cs == 0 then return 0 end
+    return cs
+end
+
+local function get_netchan_from_cs(cs)
+    if not cs or cs == 0 then return 0 end
+    local nc = read_i(cs + CS_NETCHAN_OFF)
+    if nc and nc ~= 0 then return nc end
+    local ok, ptr = pcall(engine.get_netchan_ptr)
+    if ok and ptr and ptr ~= 0 then return ptr end
+    return 0
+end
+
+local function spoof_netchan(nc)
+    if not nc or nc == 0 then return end
+    if not net_snap.has then
+        local a = read_i(nc + NC_ACK_OFF)
+        local c = read_i(nc + NC_CHOKED_OFF)
+        if a ~= nil and c ~= nil and a ~= -1 then
+            net_snap.ack = a
+            net_snap.choked = c
+            net_snap.has = true
+        end
+    end
+    write_i(nc + NC_ACK_OFF, -1)
+    write_i(nc + NC_CHOKED_OFF, 255)
+end
+
+local function restore_netchan(nc)
+    if not nc or nc == 0 or not net_snap.has then return end
+    local a = read_i(nc + NC_ACK_OFF)
+    local c = read_i(nc + NC_CHOKED_OFF)
+    if a == -1 then write_i(nc + NC_ACK_OFF, net_snap.ack) end
+    if c == 255 then write_i(nc + NC_CHOKED_OFF, net_snap.choked) end
+    net_snap.has = false
+end
+
+local function write_choked_value(value)
+    local cs = get_raw_clientstate()
+    if cs == 0 then return false end
+    write_i(cs + CS_CHOKED_OFF, value)
+    local nc = get_netchan_from_cs(cs)
+    if nc ~= 0 then spoof_netchan(nc) end
+    return true
+end
+
+local choke1 = { enabled = false, key = keys.KEY_F, value = 45, prev = false }
+local choke2 = { enabled = false, key = 0, value = 45, prev = false }
+local bleed = { enabled = false, key = 0, value = 45, prev = false }
+local bleed_imp = { enabled = false, key = 0, value = 45, prev = false }
+local aimware = { enabled = false, key = keys.KEY_F, value = 666 }
+
+local function apply_aimware_choke()
+    local val = math.floor(aimware.value or 0)
+    if val < 0 then val = 0 end
+    if val > 4096 then val = 4096 end
+    write_choked_value(val)
+end
+
+local function sum_bleed_choke()
+    local sum = 0
+    if choke1.enabled then sum = sum + (choke1.value or 0) end
+    if choke2.enabled then sum = sum + (choke2.value or 0) end
+    if bleed.enabled then sum = sum + (bleed.value or 0) end
+    if bleed_imp.enabled then sum = sum + (bleed_imp.value or 0) end
+    return sum
+end
+
+function on_cl_move_pre()
+    if waiting_for_key then return end
+
+    rising_toggle(choke1, "key", "enabled", "prev")
+    rising_toggle(choke2, "key", "enabled", "prev")
+    rising_toggle(bleed, "key", "enabled", "prev")
+    rising_toggle(bleed_imp, "key", "enabled", "prev")
+
+    local need_choke = sum_bleed_choke()
+    local aw_hold = aimware.enabled and key_down(aimware.key)
+
+    if aw_hold then
+        apply_aimware_choke()
+    elseif need_choke > 0 then
+        write_choked_value(need_choke)
+    end
+
+    local still_spoof = aw_hold or need_choke > 0
+    if not still_spoof and net_snap.has then
+        local allow_restore = bleed_imp.enabled or (not bleed.enabled and not choke1.enabled and not choke2.enabled)
+        if allow_restore then
+            local cs = get_raw_clientstate()
+            restore_netchan(get_netchan_from_cs(cs))
+        end
+    end
+end
+
+local function draw_checkbox(label, store, field)
+    local c, v = imgui.checkbox(label, store[field])
+    if c then store[field] = v end
+end
+
+local function draw_slider_int(label, store, field, minv, maxv)
+    local c, v = imgui.slider_int(label, store[field], minv, maxv)
+    if c then store[field] = v end
+end
+
+local function ui_chokes()
+    imgui.text("Choke Exploit 1")
+    draw_checkbox("Enable Choke 1", choke1, "enabled")
+    keybind_button("Choke 1 key (toggle)", choke1, "key", keys.KEY_F)
+    draw_slider_int("Choke 1 value", choke1, "value", 0, 500)
+    imgui.separator()
+    imgui.text("Choke Exploit 2")
+    draw_checkbox("Enable Choke 2", choke2, "enabled")
+    keybind_button("Choke 2 key (toggle)", choke2, "key", 0)
+    draw_slider_int("Choke 2 value", choke2, "value", 0, 500)
+    imgui.separator()
+    imgui.text("Bleed")
+    draw_checkbox("Enable Bleed", bleed, "enabled")
+    keybind_button("Bleed key (toggle)", bleed, "key", 0)
+    draw_slider_int("Bleed value", bleed, "value", 0, 500)
+    imgui.separator()
+    imgui.text("Bleed Improved")
+    draw_checkbox("Enable Bleed Improved", bleed_imp, "enabled")
+    keybind_button("Bleed Imp key (toggle)", bleed_imp, "key", 0)
+    draw_slider_int("Bleed Imp value", bleed_imp, "value", 0, 500)
+end
+
+local function ui_aimware()
+    imgui.text("Aimware Choke")
+    draw_checkbox("Enable Aimware Choke", aimware, "enabled")
+    keybind_button("Choke key (hold)", aimware, "key", keys.KEY_F)
+    draw_slider_int("Choke value", aimware, "value", 0, 4096)
+end
+
+pcall(function()
+    menu.add_sub_tab("Aimbot", "Chokes", function()
+        ui_chokes()
+    end)
+end)
+
+pcall(function()
+    menu.add_sub_tab("Aimbot", "Aimware Choke", function()
+        ui_aimware()
+    end)
+end)
+
+function on_end_scene()
+    if not waiting_for_key or not keybind_target or not keybind_target_field then
+        return
+    end
+    if imgui.begin("Keybind", 0) then
+        imgui.text("Press a key...")
+        imgui.text("ESC cancel")
+        imgui["end"]()
+    end
+    for k, _ in pairs(KEY_NAMES) do
+        if input.is_key_pressed(k) then
+            if k == keys.ESCAPE then
+                waiting_for_key = false
+                keybind_target = nil
+                keybind_target_field = nil
+            else
+                keybind_target[keybind_target_field] = k
+                waiting_for_key = false
+                keybind_target = nil
+                keybind_target_field = nil
+            end
+            break
+        end
+    end
+end
+
+function on_unload()
+    local cs = get_raw_clientstate()
+    local nc = get_netchan_from_cs(cs)
+    restore_netchan(nc)
+    net_snap.has = false
+end

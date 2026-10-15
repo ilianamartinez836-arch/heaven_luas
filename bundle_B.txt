@@ -1,0 +1,1596 @@
+
+
+===== FILE: consistencybypass.lua =====
+
+client.set_shared_bool("consistency_bypass_enabled", false)
+
+local sv_consistency = cvar.find("sv_consistency")
+local sv_pure = cvar.find("sv_pure")
+
+local function apply_bypass()
+    local enabled = client.get_shared_bool("consistency_bypass_enabled", false)
+    if not enabled then return end
+
+    if sv_consistency ~= 0 then
+        cvar.remove_flags(sv_consistency, cvar_flags.PROTECTED)
+        cvar.remove_flags(sv_consistency, cvar_flags.CHEAT)
+        cvar.set_int(sv_consistency, 0)
+    end
+
+    if sv_pure ~= 0 then
+        cvar.remove_flags(sv_pure, cvar_flags.PROTECTED)
+        cvar.remove_flags(sv_pure, cvar_flags.CHEAT)
+        cvar.set_int(sv_pure, 0)
+    end
+end
+
+function on_create_move(cmd, local_player)
+    apply_bypass()
+end
+
+apply_bypass()
+
+menu.add_sub_tab("Exploits", "ConsistencyBypass", function()
+    imgui.text("Consistency Bypass")
+
+    local current_state = client.get_shared_bool("consistency_bypass_enabled", false)
+    local changed, val = imgui.checkbox("Enabled Consistency bypass", current_state)
+    
+    if changed then
+        client.set_shared_bool("consistency_bypass_enabled", val)
+        apply_bypass()
+    end
+
+    imgui.separator()
+
+    imgui.text("Current values:")
+    if sv_consistency ~= 0 then
+        imgui.text("sv_consistency: " .. cvar.get_int(sv_consistency))
+    end
+    if sv_pure ~= 0 then
+        imgui.text("sv_pure: " .. cvar.get_int(sv_pure))
+    end
+
+    imgui["end"]()
+end)
+
+
+===== FILE: infected aim.lua =====
+
+
+
+local config = {
+    enabled      = true,
+    aimkey       = keys.MOUSE4,
+    fov          = 180.0,
+    smooth       = 1.0,
+    chest_blend  = 0.65,
+    max_distance = 8192,
+    silent_aim   = false,
+    vischeck     = true,
+}
+
+local function load_cfg()
+    config.enabled      = client.get_shared_bool("ab_enabled",      config.enabled)
+    config.fov          = client.get_shared_float("ab_fov",         config.fov)
+    config.smooth       = client.get_shared_float("ab_smooth",      config.smooth)
+    config.chest_blend  = client.get_shared_float("ab_chest_blend", config.chest_blend)
+    config.max_distance = client.get_shared_float("ab_max_dist",    config.max_distance)
+    config.silent_aim   = client.get_shared_bool("ab_silent",       config.silent_aim)
+    config.vischeck     = client.get_shared_bool("ab_vischeck",     config.vischeck)
+end
+
+local function save_cfg()
+    client.set_shared_bool("ab_enabled",      config.enabled)
+    client.set_shared_float("ab_fov",         config.fov)
+    client.set_shared_float("ab_smooth",      config.smooth)
+    client.set_shared_float("ab_chest_blend", config.chest_blend)
+    client.set_shared_float("ab_max_dist",    config.max_distance)
+    client.set_shared_bool("ab_silent",       config.silent_aim)
+    client.set_shared_bool("ab_vischeck",     config.vischeck)
+    client.set_shared_bool("ab_fov_circle",   true)
+end
+
+load_cfg()
+
+
+local locked_entity    = nil
+local prev_key_down    = false
+local cached_lp_index  = -1 
+
+
+local function calcAngle(src, dst)
+    local dx  = dst.x - src.x
+    local dy  = dst.y - src.y
+    local dz  = dst.z - src.z
+    local hyp = math.sqrt(dx*dx + dy*dy)
+    return vector.new(
+        math.deg(math.atan2(-dz, hyp)),
+        math.deg(math.atan2(dy, dx)),
+        0)
+end
+
+local function normalizeAngle(angle)
+    while angle >  180 do angle = angle - 360 end
+    while angle < -180 do angle = angle + 360 end
+    return angle
+end
+
+local function getFOV(viewAngles, aimAngles)
+    local dp = normalizeAngle(aimAngles.x - viewAngles.x)
+    local dy = normalizeAngle(aimAngles.y - viewAngles.y)
+    return math.sqrt(dp*dp + dy*dy)
+end
+
+local function smoothAngles(current, target, smooth)
+    local dp = normalizeAngle(target.x - current.x)
+    local dy = normalizeAngle(target.y - current.y)
+    local f  = 1.0 / math.max(smooth, 1.0)
+    return vector.new(
+        current.x + dp * f,
+        current.y + dy * f,
+        0)
+end
+
+local function get_aim_pos(player)
+    local origin = player:get_origin()
+    local eye    = player:get_eye_position()
+    if not origin or not eye then return nil end
+    local t = config.chest_blend
+    return vector.new(
+        origin.x + (eye.x - origin.x) * t,
+        origin.y + (eye.y - origin.y) * t,
+        origin.z + (eye.z - origin.z) * t)
+end
+
+-- ─────────────────────────────────────────────
+-- VISCHECK
+-- ─────────────────────────────────────────────
+
+local function is_visible(player)
+    if not config.vischeck then return true end
+    local raw = entity.get_by_index_raw(player:get_index())
+    if not raw or raw == 0 then return true end
+    return not entity.is_dormant(raw)
+end
+
+
+local function is_valid_locked(ent, eye_pos)
+    if not ent then return false end
+    if not ent:is_alive() then return false end
+    if ent:get_team() ~= 2 then return false end
+    if ent:is_incapacitated() then return false end
+    local o = ent:get_origin()
+    if not o then return false end
+    if vector.distance(eye_pos, o) > config.max_distance then return false end
+    if not is_visible(ent) then return false end
+    return true
+end
+
+local function getBestTarget(local_player)
+    local eye_pos   = local_player:get_eye_position()
+    local view_angs = local_player:get_eye_angles()
+    local local_idx = local_player:get_index()
+    local mc        = engine.get_max_clients()
+
+    local best     = nil
+    local best_fov = config.fov
+
+    for i = 1, mc do
+        local player = entity.get_by_index(i)
+        if not player                then goto continue end
+        if i == local_idx            then goto continue end
+        if not player:is_alive()     then goto continue end
+        if player:get_team() ~= 2   then goto continue end
+        if player:is_incapacitated() then goto continue end
+        if not is_visible(player)    then goto continue end
+
+        local aim_pos = get_aim_pos(player)
+        if not aim_pos then goto continue end
+
+        local dist = vector.distance(eye_pos, player:get_origin())
+        if dist > config.max_distance then goto continue end
+
+        local aim_angle = calcAngle(eye_pos, aim_pos)
+        local fov       = getFOV(view_angs, aim_angle)
+        if fov > best_fov then goto continue end
+
+        best_fov = fov
+        best = { player = player, aim_pos = aim_pos, aim_angle = aim_angle }
+
+        ::continue::
+    end
+
+    return best
+end
+
+
+
+function on_create_move(cmd, local_player)
+    if not local_player or not local_player:is_alive() then return end
+    if not engine.is_in_game() then return end
+
+    -- Cache index every tick so on_paint can retrieve the local player
+    cached_lp_index = local_player:get_index()
+
+    if not config.enabled then return end
+
+    -- Yield to tank rock script
+    if client.get_shared_bool("tank_active", false) then
+        locked_entity = nil
+        return
+    end
+
+    local team = local_player:get_team()
+
+    -- Only run aimbot on infected, skip tank
+    if team ~= 3 then return end
+    if local_player:get_zombie_class() == zombie_class.TANK then return end
+
+    local key_down = input.is_key_down(config.aimkey)
+
+    if not key_down then
+        locked_entity = nil
+        prev_key_down = false
+        return
+    end
+
+    local eye_pos = local_player:get_eye_position()
+    if not eye_pos then return end
+
+    if locked_entity and not is_valid_locked(locked_entity, eye_pos) then
+        locked_entity = nil
+    end
+
+    if not locked_entity then
+        local t = getBestTarget(local_player)
+        if not t then return end
+        locked_entity = t.player
+    end
+
+    local aim_pos = get_aim_pos(locked_entity)
+    if not aim_pos then locked_entity = nil; return end
+
+    local aim_angle = calcAngle(eye_pos, aim_pos)
+    local current   = cmd:get_viewangles()
+    local final
+
+    if config.smooth > 1.0 then
+        final = smoothAngles(current, aim_angle, config.smooth)
+    else
+        final = aim_angle
+    end
+
+    final.x = math.clamp(normalizeAngle(final.x), -89.0, 89.0)
+    final.y = normalizeAngle(final.y)
+
+    cmd:set_viewangles(final)
+    if not config.silent_aim then
+        engine.set_view_angles(final)
+    end
+
+    prev_key_down = key_down
+end
+
+-- ─────────────────────────────────────────────
+-- FOV CIRCLE
+-- ─────────────────────────────────────────────
+
+function on_paint()
+    if not engine.is_in_game() then return end
+    if not config.enabled then return end
+    if not client.get_shared_bool("ab_fov_circle", true) then return end
+
+    pcall(function()
+        -- Retrieve local player via cached index — local_player is not a
+        -- global in Heaven-Hook, only a parameter in on_create_move.
+        if cached_lp_index < 0 then return end
+        local lp = entity.get_by_index(cached_lp_index)
+        if not lp or not lp:is_alive() then return end
+
+        -- Circle only shows on infected team (team 3)
+        if lp:get_team() ~= 3 then return end
+
+        local sw, sh = draw.get_screen_size()
+        if not sw or sw == 0 then return end
+
+        local cx     = math.floor(sw / 2)
+        local cy     = math.floor(sh / 2)
+        local radius = math.min(
+            math.floor((config.fov / 180.0) * (sh * 0.5)),
+            math.floor(sh * 0.48))
+        if radius <= 0 then return end
+
+        local r, g, b = 1.0, 1.0, 1.0   -- default: white = idle
+
+        local zc = lp:get_zombie_class()
+        if zc == zombie_class.TANK then
+            -- Tank punch range indicator
+            local my_origin = lp:get_origin()
+            local mc        = engine.get_max_clients()
+            local closest   = math.huge
+
+            if my_origin then
+                for i = 1, mc do
+                    local p = entity.get_by_index(i)
+                    if p and p ~= lp and p:is_alive()
+                       and p:get_team() == 2 and not p:is_incapacitated()
+                    then
+                        local o = p:get_origin()
+                        if o then
+                            local d = vector.distance(my_origin, o)
+                            if d < closest then closest = d end
+                        end
+                    end
+                end
+            end
+
+            if closest <= 150 then
+                r, g, b = 0.2, 1.0, 0.3   -- green = survivor in punch range
+            else
+                r, g, b = 1.0, 0.2, 0.2   -- red = nobody in punch range
+            end
+        else
+            -- Non-tank infected colors
+            if locked_entity then
+                r, g, b = 0.2, 1.0, 0.3   -- green = locked
+            elseif input.is_key_down(config.aimkey) then
+                r, g, b = 1.0, 0.2, 0.2   -- red = searching, no target
+            end
+            -- else white stays (idle)
+        end
+
+        draw.outlined_circle(cx, cy, radius, 64, r, g, b, 0.8)
+    end)
+end
+
+-- ─────────────────────────────────────────────
+-- MENU
+-- ─────────────────────────────────────────────
+
+if not _G.ab_menu_registered then
+    _G.ab_menu_registered = true
+
+    menu.add_sub_tab("Aimbot", "Aimbot", function()
+        local ok, err = pcall(function()
+            local c, v
+
+            imgui.separator()
+            imgui.text_colored(1.0, 0.4, 0.4, 1.0, "Aimbot v2.2")
+            imgui.separator()
+
+            c, v = imgui.checkbox("Enable", config.enabled)
+            if c then config.enabled = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0,
+                "(infected team only — hold aimkey to activate)")
+
+            if locked_entity then
+                imgui.text_colored(0.2, 1.0, 0.3, 1.0, "  LOCKED onto target")
+            else
+                imgui.text_colored(0.5, 0.5, 0.5, 1.0, "  No target locked")
+            end
+
+            imgui.spacing()
+            imgui.text_colored(0.7, 0.7, 1.0, 1.0, "Vischeck")
+            imgui.separator()
+
+            c, v = imgui.checkbox("Vischeck", config.vischeck)
+            if c then config.vischeck = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(skip dormant/hidden survivors)")
+
+            imgui.spacing()
+            imgui.text_colored(0.7, 0.7, 1.0, 1.0, "Aim")
+            imgui.separator()
+
+            c, v = imgui.slider_float("Chest Blend", config.chest_blend, 0.0, 1.0)
+            if c then config.chest_blend = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0,
+                "(0=feet  0.5=mid  0.65=chest/neck  1.0=eyes)")
+
+            c, v = imgui.checkbox("Silent Aim", config.silent_aim)
+            if c then config.silent_aim = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(cmd only — camera never moves)")
+
+            c, v = imgui.checkbox("FOV Circle",
+                client.get_shared_bool("ab_fov_circle", true))
+            if c then client.set_shared_bool("ab_fov_circle", v) end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0,
+                "(white=idle  green=locked  red=searching  infected only)")
+
+            c, v = imgui.slider_float("Smooth", config.smooth, 1.0, 20.0)
+            if c then config.smooth = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(1.0 = instant snap)")
+
+            c, v = imgui.slider_float("FOV", config.fov, 1.0, 180.0)
+            if c then config.fov = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(cone for initial target acquisition)")
+
+            c, v = imgui.slider_float("Max Distance", config.max_distance, 100.0, 8192.0)
+            if c then config.max_distance = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(units)")
+
+            imgui.spacing()
+            imgui.separator()
+            imgui.text("Targets: survivors (team 2) only.")
+            imgui.text("Tank: aimbot skipped, circle shows punch range (green=in range).")
+            imgui.text("Circle only visible on infected team.")
+            imgui.text("Lock: holds target — mouse movement won't switch.")
+            imgui.text("Vischeck: lock drops if target goes dormant.")
+        end)
+
+        if not ok then
+            imgui.text_colored(1.0, 0.3, 0.3, 1.0, "menu error: " .. tostring(err))
+        end
+    end)
+end
+
+
+
+===== FILE: keyboard.lua =====
+
+local keyboard = {
+    enabled = true,
+    x = 100,
+    y = 100,
+    key_size = 40,
+    key_spacing = 4,
+    active_color = {r = 0.85, g = 0.15, b = 0.15, a = 0.6},
+    inactive_color = {r = 0.25, g = 0.25, b = 0.25, a = 0.5},
+    text_color = {r = 0.6, g = 0.6, b = 0.6, a = 1},
+    border_color = {r = 0, g = 0, b = 0, a = 0.1},
+    transition_speed = 14.0,
+    smooth = true,
+    states = {}
+}
+
+local function define_layout()
+    return {
+        row1 = {"TAB", "Q", "W", "E", "R"},
+        row2 = {"CAPSLOCK", "A", "S", "D", "F"},
+        row3 = {"SHIFT", "Z", "X", "C"},
+        row4 = {"CTRL", "SPACE"}
+    }
+end
+
+local layout = define_layout()
+
+for _, row in pairs(layout) do
+    for _, key in ipairs(row) do
+        keyboard.states[key:lower()] = 0.0
+    end
+end
+
+local function update_state(key, pressed, dt)
+    local target = pressed and 1.0 or 0.0
+    local current = keyboard.states[key]
+    local speed = keyboard.transition_speed * dt
+    if keyboard.smooth then
+        if current < target then
+            current = math.min(current + speed, target)
+        else
+            current = math.max(current - speed, target)
+        end
+    else
+        current = target
+    end
+    keyboard.states[key] = current
+end
+
+local function draw_key(x, y, w, h, label, active)
+    local col = active and keyboard.active_color or keyboard.inactive_color
+    draw.rect(x, y, w, h, col.r, col.g, col.b, col.a)
+    draw.outlined_rect(x, y, w, h,
+        keyboard.border_color.r,
+        keyboard.border_color.g,
+        keyboard.border_color.b,
+        keyboard.border_color.a
+    )
+    draw.string(fonts.DEBUG, x + w / 2, y + h / 2 - 7,
+        keyboard.text_color.r,
+        keyboard.text_color.g,
+        keyboard.text_color.b,
+        keyboard.text_color.a,
+        text_align.CENTERX,
+        label
+    )
+end
+
+
+local function get_inputs()
+    return {
+        tab = input.is_key_down(keys.TAB),
+        capslock = input.is_key_down(keys.CAPSLOCK),
+        q = input.is_key_down(keys.KEY_Q),
+        w = input.is_key_down(keys.KEY_W),
+        e = input.is_key_down(keys.KEY_E),
+        r = input.is_key_down(keys.KEY_R),
+        a = input.is_key_down(keys.KEY_A),
+        s = input.is_key_down(keys.KEY_S),
+        d = input.is_key_down(keys.KEY_D),
+        f = input.is_key_down(keys.KEY_F),
+        shift = input.is_key_down(keys.SHIFT),
+        z = input.is_key_down(keys.KEY_Z),
+        x = input.is_key_down(keys.KEY_X),
+        c = input.is_key_down(keys.KEY_C),
+        ctrl = input.is_key_down(keys.CTRL),
+        space = input.is_key_down(keys.SPACE)
+    }
+end
+
+function on_paint()
+    if not keyboard.enabled then return end
+    local dt = client.get_frame_time()
+    local s, sp = keyboard.key_size, keyboard.key_spacing
+    local x, y = keyboard.x, keyboard.y
+    local states = get_inputs()
+
+    for key, pressed in pairs(states) do
+        update_state(key, pressed, dt)
+    end
+
+    local x1 = x
+    for i, k in ipairs(layout.row1) do
+        local w_key = (k == "TAB") and s * 1.3 or s
+        draw_key(x1, y, w_key, s, k, states[k:lower()])
+        x1 = x1 + w_key + sp
+    end
+
+    local row2_y = y + s + sp
+    local x2 = x + (s * 0.1)
+    for i, k in ipairs(layout.row2) do
+        local w_key = (k == "CAPSLOCK") and s * 1.5 or s
+        draw_key(x2, row2_y, w_key, s, k, states[k:lower()])
+        x2 = x2 + w_key + sp
+    end
+
+    local row3_y = row2_y + s + sp
+    local x3 = x + (s * 0.1)
+    draw_key(x3, row3_y, s * 1.7, s, "SHIFT", states["shift"])
+    x3 = x3 + s * 1.7 + sp
+    for i, k in ipairs({"Z", "X", "C"}) do
+        draw_key(x3 + (i - 1) * (s + sp), row3_y, s, s, k, states[k:lower()])
+    end
+    local row4_y = row3_y + s + sp
+    local x4 = x 
+    draw_key(x4, row4_y, s * 1.3, s, "CTRL", states["ctrl"])
+    draw_key(x4 + s * 1.3 + sp, row4_y, s * 3.5, s, "SPACE", states["space"])
+end
+
+function on_create_move()
+    if input.is_key_pressed(keys.F10) then
+        keyboard.enabled = not keyboard.enabled
+    end
+end
+
+
+===== FILE: namestealer.lua =====
+
+local name_stealer = {
+    names = {},
+    current_index = 1,
+    next_change_time = 0.0,
+    spoof_init = false,
+    was_enabled = false,
+    was_in_game = false,
+    mode = 3, -- 1 = Everyone, 2 = Enemies, 3 = Teammates
+    enabled = false,
+    cooldown = 2.0
+}
+local function get_curtime()
+    return client.get_tick_count() * client.get_frame_time()
+end
+
+local function refresh_names(local_player)
+    name_stealer.names = {}
+    
+    if not local_player then
+        return
+    end
+    
+    local local_team = local_player:get_team()
+    local local_index = local_player:get_index()
+    
+    local max_clients = engine.get_max_clients()
+    for i = 1, max_clients do
+        local player = entity.get_by_index(i)
+        
+        if player and player:get_index() ~= local_index then
+            local pname = player:get_name()
+            
+            if pname and pname ~= "" and pname ~= "unknown" then
+                local other_team = player:get_team()
+                
+                local should_add = false
+                if name_stealer.mode == 1 then
+                    should_add = true
+                elseif name_stealer.mode == 2 then
+                    should_add = (local_team ~= other_team)
+                elseif name_stealer.mode == 3 then
+                    should_add = (local_team == other_team)
+                end
+                
+                if should_add then
+                    table.insert(name_stealer.names, pname)
+                end
+            end
+        end
+    end
+end
+
+function on_create_move(cmd, local_player)
+    if not cmd or not local_player then
+        return
+    end
+    
+    name_stealer.enabled = client.get_shared_bool("namesteal_enabled", false)
+    
+    if not name_stealer.enabled then
+        if name_stealer.was_enabled then
+            name_stealer.names = {}
+            name_stealer.current_index = 1
+            name_stealer.next_change_time = 0.0
+            name_stealer.spoof_init = false
+            name_stealer.was_enabled = false
+        end
+        return
+    end
+    
+    local in_game = engine.is_in_game()
+    
+    if not name_stealer.was_enabled or (name_stealer.was_in_game ~= in_game) then
+        name_stealer.names = {}
+        name_stealer.current_index = 1
+        name_stealer.next_change_time = 0.0
+        name_stealer.spoof_init = false
+        name_stealer.was_enabled = true
+        name_stealer.was_in_game = in_game
+    end
+    
+    if not in_game then
+        return
+    end
+        -- this thing is ported from hannibal so this is not needed
+    if not name_stealer.spoof_init then
+        client.execnormal("setinfo name \"​\"")
+        name_stealer.spoof_init = true
+        name_stealer.next_change_time = get_curtime() + 2.0
+        return
+    end
+    if #name_stealer.names == 0 then
+        refresh_names(local_player)
+        if #name_stealer.names == 0 then
+            return
+        end
+    end
+    
+    local current_time = get_curtime()
+    
+    if current_time >= name_stealer.next_change_time then
+        if name_stealer.current_index > #name_stealer.names then
+            name_stealer.current_index = 1
+        end
+        
+        local new_name = name_stealer.names[name_stealer.current_index]
+        
+        local spoofed = "​" .. new_name
+        
+        client.execnormal('setinfo name "' .. spoofed .. '"')
+        
+        name_stealer.current_index = name_stealer.current_index + 1
+        name_stealer.next_change_time = current_time + name_stealer.cooldown
+    end
+end
+
+local function steal_once()
+    if not engine.is_in_game() then
+        return
+    end
+    
+    local local_player = client.get_local_player()
+    if not local_player or not local_player:is_alive() then
+        return
+    end
+    
+    local candidates = {}
+    local local_team = local_player:get_team()
+    local local_index = local_player:get_index()
+    
+    local max_clients = engine.get_max_clients()
+    for i = 1, max_clients do
+        if i ~= local_index then
+            local player = entity.get_by_index(i)
+            
+            if player then
+                local pname = player:get_name()
+                
+                if pname and pname ~= "" and pname ~= "unknown" then
+                    local other_team = player:get_team()
+                    
+                    local should_add = false
+                    if name_stealer.mode == 1 then
+                        should_add = true
+                    elseif name_stealer.mode == 2 then
+                        should_add = (local_team ~= other_team)
+                    elseif name_stealer.mode == 3 then
+                        should_add = (local_team == other_team)
+                    end
+                    
+                    if should_add then
+                        table.insert(candidates, pname)
+                    end
+                end
+            end
+        end
+    end
+    
+    if #candidates > 0 then
+        local random_name = candidates[math.random(1, #candidates)]
+        local spoofed = "​" .. random_name
+        client.execnormal('setinfo name "' .. spoofed .. '"')
+    else
+    end
+end
+
+
+function on_create_move(cmd, local_player)
+    if input.is_key_pressed(keys.HOME) then
+        name_stealer.enabled = not name_stealer.enabled
+        client.set_shared_bool("namesteal_enabled", name_stealer.enabled)
+        client.print("[Name Stealer] " .. (name_stealer.enabled and "Enabled" or "Disabled"))
+    end
+    
+    if input.is_key_pressed(keys.END) then
+        steal_once()
+    end
+    
+    if not cmd or not local_player or not local_player:is_alive() then
+        return
+    end
+    
+    name_stealer.enabled = client.get_shared_bool("namesteal_enabled", false)
+    
+    if not name_stealer.enabled then
+        if name_stealer.was_enabled then
+            name_stealer.names = {}
+            name_stealer.current_index = 1
+            name_stealer.next_change_time = 0.0
+            name_stealer.spoof_init = false
+            name_stealer.was_enabled = false
+        end
+        return
+    end
+    
+    local in_game = engine.is_in_game()
+    
+    if not name_stealer.was_enabled or (name_stealer.was_in_game ~= in_game) then
+        name_stealer.names = {}
+        name_stealer.current_index = 1
+        name_stealer.next_change_time = 0.0
+        name_stealer.spoof_init = false
+        name_stealer.was_enabled = true
+        name_stealer.was_in_game = in_game
+    end
+    
+    if not in_game then
+        return
+    end
+    -- is it my idea or is createmove repeated, idk it works so if it works dont touch it
+    if not name_stealer.spoof_init then
+      --  client.execnormal("setinfo name \"​\"")
+        name_stealer.spoof_init = true
+        name_stealer.next_change_time = get_curtime() + 2.0
+        return
+    end
+    
+    if #name_stealer.names == 0 then
+        refresh_names(local_player)
+        if #name_stealer.names == 0 then
+            return
+        end
+    end
+    
+    local current_time = get_curtime()
+    
+    if current_time >= name_stealer.next_change_time then
+        if name_stealer.current_index > #name_stealer.names then
+            name_stealer.current_index = 1
+        end
+        
+        local new_name = name_stealer.names[name_stealer.current_index]
+        local spoofed = "​" .. new_name
+        
+        client.execnormal('setinfo name "' .. spoofed .. '"')
+        
+        name_stealer.current_index = name_stealer.current_index + 1
+        name_stealer.next_change_time = current_time + name_stealer.cooldown
+    end
+end
+
+client.print("[Name Stealer] Script loaded!")
+client.print("[Name Stealer] Press HOME to toggle | END to steal once")
+
+
+
+
+===== FILE: network better.lua =====
+
+local config = {
+    update_interval = 1.0
+}
+
+local netdata = {
+    last_update = 0,
+    cached_stats = {}
+}
+
+local function get_player_name()
+    local local_player = client.get_local_player()
+    if not local_player then return "Unknown" end
+
+    local index = local_player:get_index()
+    if not index or index <= 0 then return "Unknown" end
+
+    local info = engine.get_player_info(index)
+    if info and info.name then
+        return info.name
+    end
+
+    return "Unknown"
+end
+
+local function get_map_name()
+    if not engine.is_in_game() then
+        return "Menu"
+    end
+
+    local map = engine.get_level_name_short()
+    if map and map ~= "" then
+        return map
+    end
+
+    return "Unknown"
+end
+
+local function get_map_full()
+    if not engine.is_in_game() then
+        return "Not in game"
+    end
+
+    local map = engine.get_level_name()
+    if map and map ~= "" then
+        return map
+    end
+
+    return "Unknown"
+end
+
+local function update_network_stats()
+    if not engine.is_connected() then
+        netdata.cached_stats = { "Not connected to a server" }
+        return
+    end
+
+    local net = engine.get_net_channel_info()
+    if not net then
+        netdata.cached_stats = { "No net channel info" }
+        return
+    end
+
+    local serverAddress = net.address or "Unknown"
+    local player_name = get_player_name()
+    local map_short = get_map_name()
+    local map_full = get_map_full()
+    local time_str = os.date("%H:%M:%S")
+    local date_str = os.date("%d/%m/%Y")
+
+    netdata.cached_stats = {
+        string.format("Player: %s", player_name),
+        string.format("Map: %s", map_short),
+        string.format("Full Map: %s", map_full),
+        string.format("Time: %s  |  Date: %s", time_str, date_str),
+        "-----------------------------",
+        string.format("Server: %s", serverAddress),
+        string.format("Latency Out/In: %.1f / %.1f ms", net.latency_out * 1000, net.latency_in * 1000),
+        string.format("Loss: %.2f%%  |  Choke: %.2f%%", net.loss_out * 100, net.choke_out * 100),
+        string.format("Rate: %.1f KB/s Out | %.1f KB/s In", net.data_out / 1024, net.data_in / 1024),
+        string.format("Packets: %.1f/s Out | %.1f/s In", net.packets_out, net.packets_in),
+        string.format("Total Data: %.2f MB Out | %.2f MB In", net.total_data_out / 1024 / 1024, net.total_data_in / 1024 / 1024),
+        string.format("Connected: %.1fs", net.time_connected),
+        string.format("Timeout: %.1fs  |  Timing Out: %s", net.timeout_seconds, tostring(net.is_timing_out))
+    }
+end
+
+function on_end_scene()
+    local now = os.clock()
+
+    if now - netdata.last_update > config.update_interval then
+        update_network_stats()
+        netdata.last_update = now
+    end
+
+    local flags = imgui.ImGuiWindowFlags_NoTitleBar +
+                  imgui.ImGuiWindowFlags_AlwaysAutoResize +
+                  imgui.ImGuiWindowFlags_NoScrollbar
+
+    if not menu.is_open() then
+        flags = flags + imgui.ImGuiWindowFlags_NoInputs +
+                        imgui.ImGuiWindowFlags_NoMove
+    end
+
+    if imgui.begin("##NetworkOverlay", flags) then
+
+        if netdata.cached_stats and #netdata.cached_stats > 0 then
+            for _, line in ipairs(netdata.cached_stats) do
+                imgui.text(line)
+            end
+        else
+            imgui.text("Waiting for data...")
+        end
+
+        imgui["end"]()
+    end
+end
+
+
+
+===== FILE: strafeswitch.lua =====
+
+cvar_vars.set_int("vars_movement_mode", 3)
+
+local k_left_last = false
+local k_right_last = false
+
+local modes = { 1, 3, 4, 0 }
+local mode_names = { 
+    [1] = "BHOP", 
+    [3] = "BHOP+STRAFER", 
+    [4] = "STORM",
+    [0] = "LUA CUSTOM" 
+}
+
+local function get_mode_index(current)
+    for i, v in ipairs(modes) do
+        if v == current then return i end
+    end
+    return 1
+end
+
+local IN_JUMP = 2
+local MOVETYPE_WALK = 2
+local MOVETYPE_NOCLIP = 8
+local MOVETYPE_LADDER = 9
+local MOVETYPE_OBSERVER = 10
+
+if client.get_shared_bool("bhop_initialized", nil) == nil then
+    client.set_shared_bool("bhop_initialized", true)
+    client.set_shared_bool("bhop_enabled", false)
+    client.set_shared_bool("strafe_enabled", false)
+end
+
+local function normalize_rad(angle)
+    angle = angle % (2 * math.pi)
+    if angle > math.pi then
+        angle = angle - 2 * math.pi
+    elseif angle < -math.pi then
+        angle = angle + 2 * math.pi
+    end
+    return angle
+end
+
+local function angle_diff_rad(a1, a2)
+    return normalize_rad(a1 - a2)
+end
+
+local function apply_bhop(cmd, local_player)
+    local buttons = cmd:get_buttons()
+    if (buttons & IN_JUMP) ~= 0 and not local_player:is_on_ground() then
+        cmd:set_buttons(buttons & ~IN_JUMP)
+    end
+end
+
+local function apply_strafe(cmd, local_player)
+    local move_type = local_player:get_move_type()
+    if move_type == MOVETYPE_NOCLIP or move_type == MOVETYPE_LADDER or move_type == MOVETYPE_OBSERVER then return end
+    if local_player:is_on_ground() then return end
+
+    local velocity = local_player:get_velocity()
+    local speed = math.sqrt(velocity.x^2 + velocity.y^2)
+    if speed < 2 then return end
+
+    local max_speed = 250
+    local air_accel = 300
+    local wish_speed = 300
+    local term = (wish_speed / air_accel) / max_speed * 100.0 / speed
+
+    local perfect_delta = 0.0
+    if term > -1.0 and term < 1.0 then
+        perfect_delta = math.acos(term)
+    end
+
+    if perfect_delta ~= 0.0 then
+        local view_angles = cmd:get_viewangles()
+        local yaw_rad = math.rad(view_angles.y)
+        local vel_dir = math.atan2(velocity.y, velocity.x) - yaw_rad
+        local wish_ang = math.atan2(-cmd:get_sidemove(), cmd:get_forwardmove())
+        local delta = angle_diff_rad(vel_dir, wish_ang)
+
+        local move_dir = delta < 0.0 and (vel_dir + perfect_delta) or (vel_dir - perfect_delta)
+
+        cmd:set_forwardmove(math.cos(move_dir) * 450)
+        cmd:set_sidemove(-math.sin(move_dir) * 450)
+    end
+end
+
+function on_copy_command_movement_pre(cmd, local_player)
+    if not cmd or not local_player or not local_player:is_alive() then return end
+    if local_player:get_move_type() ~= MOVETYPE_WALK then return end
+
+    local buttons = cmd:get_buttons()
+
+    if client.get_shared_bool("bhop_enabled", false) then
+        if (buttons & IN_JUMP) ~= 0 then
+            apply_bhop(cmd, local_player)
+        end
+    end
+
+    if client.get_shared_bool("strafe_enabled", false) then
+        apply_strafe(cmd, local_player)
+    end
+end
+
+function on_paint()
+    local k_left_now = input.is_key_down(keys.LEFT)
+    local k_right_now = input.is_key_down(keys.RIGHT)
+
+    local current = cvar_vars.get_int("vars_movement_mode")
+    local idx = get_mode_index(current)
+
+    if k_left_now and not k_left_last then
+        idx = idx - 1
+        if idx < 1 then idx = #modes end
+        local new_mode = modes[idx]
+        cvar_vars.set_int("vars_movement_mode", new_mode)
+
+        if new_mode == 0 then
+            client.set_shared_bool("bhop_enabled", true)
+            client.set_shared_bool("strafe_enabled", true)
+        else
+            client.set_shared_bool("bhop_enabled", false)
+            client.set_shared_bool("strafe_enabled", false)
+        end
+    end
+
+    if k_right_now and not k_right_last then
+        idx = idx + 1
+        if idx > #modes then idx = 1 end
+        local new_mode = modes[idx]
+        cvar_vars.set_int("vars_movement_mode", new_mode)
+
+        if new_mode == 0 then
+            client.set_shared_bool("bhop_enabled", true)
+            client.set_shared_bool("strafe_enabled", true)
+        else
+            client.set_shared_bool("bhop_enabled", false)
+            client.set_shared_bool("strafe_enabled", false)
+        end
+    end
+
+    k_left_last = k_left_now
+    k_right_last = k_right_now
+
+    local display = mode_names[cvar_vars.get_int("vars_movement_mode")] or "UNKNOWN"
+    draw.string(fonts.ESP, 140, 120, 0.90, 0.9, 1.00, 1.00, text_align.LEFT, "Movement: " .. display)
+end
+
+
+===== FILE: tankrock aimbot.lua =====
+
+
+
+local cfg = {
+    enabled       = true,
+    activation    = keys.MOUSE4,    -- hold to activate
+    fov           = 90.0,           -- FOV cone for target acquisition
+    max_distance  = 3000.0,         -- max range to target survivors
+    silent        = true,           -- silent aim (camera doesn't move)
+    auto_throw    = true,           -- auto inject IN_ATTACK2 when arc is clean
+}
+
+local function load_cfg()
+    cfg.enabled      = client.get_shared_bool("tr_enabled",     cfg.enabled)
+    cfg.fov          = client.get_shared_float("tr_fov",        cfg.fov)
+    cfg.max_distance = client.get_shared_float("tr_maxdist",    cfg.max_distance)
+    cfg.silent       = client.get_shared_bool("tr_silent",      cfg.silent)
+    cfg.auto_throw   = client.get_shared_bool("tr_auto_throw",  cfg.auto_throw)
+end
+
+local function save_cfg()
+    client.set_shared_bool("tr_enabled",    cfg.enabled)
+    client.set_shared_float("tr_fov",       cfg.fov)
+    client.set_shared_float("tr_maxdist",   cfg.max_distance)
+    client.set_shared_bool("tr_silent",     cfg.silent)
+    client.set_shared_bool("tr_auto_throw", cfg.auto_throw)
+end
+
+load_cfg()
+
+-- ─────────────────────────────────────────────
+-- CONSTANTS
+-- ─────────────────────────────────────────────
+
+local TEAM_SURVIVORS   = 2
+local TEAM_INFECTED    = 3
+local CLASS_TANK       = zombie_class.TANK
+
+-- Rock physics — tune empirically if arc is off
+-- ROCK_SPEED: projectile launch speed in units/s (~1000 from L4D2 source)
+-- ROCK_GRAV_SCALE: gravity multiplier on the projectile (0.5 = half gravity)
+-- LAUNCH_OFFSET_Z: how far above eye the rock spawns
+local ROCK_SPEED       = 1000.0
+local ROCK_GRAV_SCALE  = 0.5
+local LAUNCH_OFFSET_Z  = 16.0
+
+-- Safety timer — if arc hasn't resolved in this many ticks, don't throw
+-- Prevents throwing into geometry or at unreachable targets
+local MAX_THROW_TICKS  = 3
+
+-- ─────────────────────────────────────────────
+-- STATE
+-- ─────────────────────────────────────────────
+
+local locked_target    = nil
+local throw_ready_tick = 0   -- tick when arc became clean, for settle window
+local tr_ps_owns       = false
+
+local cached_gravity   = 800.0   -- updated live from sv_gravity
+
+-- ─────────────────────────────────────────────
+-- PERFECTSILENT
+-- ─────────────────────────────────────────────
+
+local function ps_begin()
+    if not cfg.silent then return end
+    tr_ps_owns = true
+    pcall(function()
+        cvar_vars.set_bool("perfectsilent_should_silent",       true)
+        cvar_vars.set_bool("perfectsilent_initiated_by_aimbot", true)
+        cvar_vars.set_bool("perfectsilent_aimbot_has_target",   true)
+    end)
+end
+
+local function ps_clear()
+    if not tr_ps_owns then return end
+    tr_ps_owns = false
+    pcall(function()
+        cvar_vars.set_bool("perfectsilent_should_silent",       false)
+        cvar_vars.set_bool("perfectsilent_initiated_by_aimbot", false)
+        cvar_vars.set_bool("perfectsilent_aimbot_has_target",   false)
+    end)
+end
+
+-- ─────────────────────────────────────────────
+-- HELPERS
+-- ─────────────────────────────────────────────
+
+local function norm(a)
+    return math.normalize_angle(a)
+end
+
+local function calc_angle(src, dst)
+    local dx  = dst.x - src.x
+    local dy  = dst.y - src.y
+    local dz  = dst.z - src.z
+    local hyp = math.sqrt(dx * dx + dy * dy)
+    return vector.new(
+        math.deg(math.atan2(-dz, hyp)),
+        math.deg(math.atan2(dy,  dx)),
+        0)
+end
+
+local function get_fov(view_angs, aim_angs)
+    local dp = norm(aim_angs.x - view_angs.x)
+    local dy = norm(aim_angs.y - view_angs.y)
+    return math.sqrt(dp * dp + dy * dy)
+end
+
+local function refresh_gravity()
+    pcall(function()
+        local ptr = cvar.find("sv_gravity")
+        if ptr and ptr ~= 0 then
+            local g = cvar.get_float(ptr)
+            if g and g > 0 then cached_gravity = g end
+        end
+    end)
+end
+
+-- ─────────────────────────────────────────────
+-- ARC COMPENSATION
+-- Calculates the launch pitch angle needed to land the rock on the target.
+-- Uses standard projectile physics: range / speed gives time of flight,
+-- then solve for the upward angle needed to counteract gravity drop.
+--
+-- Two solutions exist for any target (high arc and low arc).
+-- We use the LOW arc (direct throw) — shorter flight time, harder to dodge.
+--
+-- Formula: pitch = atan((v^2 ± sqrt(v^4 - g*(g*x^2 + 2*y*v^2))) / (g*x))
+-- where x = horizontal distance, y = vertical distance, v = rock speed,
+-- g = effective gravity (sv_gravity * ROCK_GRAV_SCALE)
+-- ─────────────────────────────────────────────
+
+local function calc_arc_pitch(launch_pos, target_pos)
+    local dx   = target_pos.x - launch_pos.x
+    local dy   = target_pos.y - launch_pos.y
+    local dz   = target_pos.z - launch_pos.z
+
+    local horiz = math.sqrt(dx * dx + dy * dy)   -- horizontal distance
+    if horiz < 1.0 then return nil end            -- too close, no arc needed
+
+    local g    = cached_gravity * ROCK_GRAV_SCALE
+    local v    = ROCK_SPEED
+    local v2   = v * v
+    local v4   = v2 * v2
+
+    -- Discriminant — if negative, target is out of range for this rock speed
+    local disc = v4 - g * (g * horiz * horiz + 2.0 * dz * v2)
+    if disc < 0 then return nil end   -- unreachable
+
+    local sqrt_disc = math.sqrt(disc)
+
+    -- Low arc solution (direct, faster, preferred)
+    local pitch_low  = math.atan2(v2 - sqrt_disc, g * horiz)
+    -- High arc solution (lobbed) — fallback if low arc is blocked
+    local pitch_high = math.atan2(v2 + sqrt_disc, g * horiz)
+
+    -- Return low arc as primary, converted to degrees (negative = aim up in Source)
+    return -math.deg(pitch_low), -math.deg(pitch_high)
+end
+
+-- ─────────────────────────────────────────────
+-- LEAD PREDICTION
+-- Predicts where the survivor will be when the rock arrives.
+-- Time of flight estimated from horizontal distance / rock speed.
+-- ─────────────────────────────────────────────
+
+local function predict_target(origin, vel, launch_pos)
+    local dx   = origin.x - launch_pos.x
+    local dy   = origin.y - launch_pos.y
+    local horiz = math.sqrt(dx * dx + dy * dy)
+
+    -- Rough time of flight estimate (actual flight time is slightly longer
+    -- due to arc but this is close enough for lead compensation)
+    local tof  = horiz / ROCK_SPEED
+    if tof <= 0 then return origin end
+
+    return vector.new(
+        origin.x + vel.x * tof,
+        origin.y + vel.y * tof,
+        origin.z)   -- don't predict vertical — survivors rarely jump predictably
+end
+
+-- ─────────────────────────────────────────────
+-- TARGET ACQUISITION
+-- Closest to crosshair within FOV cone, alive, not incapped, team survivors.
+-- ─────────────────────────────────────────────
+
+local function get_best_target(local_player)
+    local eye_pos   = local_player:get_eye_position()
+    local view_angs = local_player:get_eye_angles()
+    local local_idx = local_player:get_index()
+    local mc        = engine.get_max_clients()
+
+    if not eye_pos or not view_angs then return nil end
+
+    -- Launch point is slightly above eye (where rock actually spawns)
+    local launch_pos = vector.new(eye_pos.x, eye_pos.y, eye_pos.z + LAUNCH_OFFSET_Z)
+
+    local best     = nil
+    local best_fov = cfg.fov
+
+    for i = 1, mc do
+        local player = entity.get_by_index(i)
+        if not player                then goto continue end
+        if i == local_idx            then goto continue end
+        if not player:is_alive()     then goto continue end
+        if player:get_team() ~= TEAM_SURVIVORS then goto continue end
+        if player:is_incapacitated() then goto continue end
+
+        local origin = player:get_origin()
+        if not origin then goto continue end
+
+        local dist = vector.distance(eye_pos, origin)
+        if dist > cfg.max_distance then goto continue end
+
+        -- Lead the target based on their velocity
+        local vel = player:get_velocity()
+        if not vel then vel = vector.new(0, 0, 0) end
+        local pred_pos = predict_target(origin, vel, launch_pos)
+
+        -- Aim at upper chest of predicted position
+        local aim_target = vector.new(pred_pos.x, pred_pos.y, pred_pos.z + 40.0)
+
+        local direct_angle = calc_angle(launch_pos, aim_target)
+        local fov_val      = get_fov(view_angs, direct_angle)
+        if fov_val > best_fov then goto continue end
+
+        -- Check arc is solvable (target reachable)
+        local pitch_low = calc_arc_pitch(launch_pos, aim_target)
+        if not pitch_low then goto continue end   -- unreachable, skip
+
+        best_fov = fov_val
+        best = {
+            player     = player,
+            pred_pos   = aim_target,
+            direct_ang = direct_angle,
+            dist       = dist,
+        }
+
+        ::continue::
+    end
+
+    return best
+end
+
+-- ─────────────────────────────────────────────
+-- MAIN HOOK
+-- ─────────────────────────────────────────────
+
+function on_create_move(cmd, local_player)
+    -- Always clear shared bool first so aimbot doesn't get stuck yielding
+    client.set_shared_bool("tank_active", false)
+
+    if not cfg.enabled then return end
+    if not local_player or not local_player:is_alive() then return end
+    if not engine.is_in_game() then return end
+    if local_player:get_team() ~= TEAM_INFECTED then return end
+    if local_player:get_zombie_class() ~= CLASS_TANK then
+        ps_clear()
+        locked_target = nil
+        return
+    end
+
+    local key_down = input.is_key_down(cfg.activation)
+
+    if not key_down then
+        -- Key released — clear everything, yield back to aimbot
+        client.set_shared_bool("tank_active", false)
+        ps_clear()
+        locked_target    = nil
+        throw_ready_tick = 0
+        return
+    end
+
+    -- Key held — signal aimbot to yield
+    client.set_shared_bool("tank_active", true)
+
+    local eye_pos = local_player:get_eye_position()
+    if not eye_pos then return end
+
+    local launch_pos = vector.new(eye_pos.x, eye_pos.y, eye_pos.z + LAUNCH_OFFSET_Z)
+
+    -- Refresh gravity periodically
+    refresh_gravity()
+
+    -- Validate existing lock
+    if locked_target then
+        local ent = locked_target.player
+        if not ent or not ent:is_alive()
+           or ent:get_team() ~= TEAM_SURVIVORS
+           or ent:is_incapacitated()
+        then
+            locked_target = nil
+        end
+    end
+
+    -- Acquire new target if none
+    if not locked_target then
+        local t = get_best_target(local_player)
+        if not t then
+            ps_clear()
+            return
+        end
+        locked_target    = t
+        throw_ready_tick = 0
+    end
+
+    -- Recompute predicted position every tick (target keeps moving)
+    local origin = locked_target.player:get_origin()
+    if not origin then locked_target = nil; ps_clear(); return end
+
+    local vel = locked_target.player:get_velocity()
+    if not vel then vel = vector.new(0, 0, 0) end
+
+    local pred_pos  = predict_target(origin, vel, launch_pos)
+    local aim_target = vector.new(pred_pos.x, pred_pos.y, pred_pos.z + 40.0)
+
+    -- Calculate arc pitch for this position
+    local pitch_low, pitch_high = calc_arc_pitch(launch_pos, aim_target)
+    if not pitch_low then
+        -- Target unreachable this tick — don't throw
+        ps_clear()
+        return
+    end
+
+    -- Build final aim angles:
+    -- Yaw = direct angle to target (horizontal)
+    -- Pitch = arc-compensated angle (angled up for gravity)
+    local direct = calc_angle(launch_pos, aim_target)
+    local final_angles = vector.new(
+        math.clamp(pitch_low, -89.0, 89.0),
+        norm(direct.y),
+        0)
+
+    -- Apply angles
+    cmd:set_viewangles(final_angles)
+    if not cfg.silent then
+        engine.set_view_angles(final_angles)
+    end
+
+    -- Claim perfectsilent so weapon fires along corrected angles
+    ps_begin()
+
+    -- Auto throw gate:
+    -- Only inject IN_ATTACK2 if auto_throw is on and arc has been
+    -- stable for at least 1 tick (avoid throwing on acquisition frame)
+    if cfg.auto_throw then
+        local cur_tick = client.get_tick_count()
+
+        if throw_ready_tick == 0 then
+            -- First tick arc is clean — start settle counter
+            throw_ready_tick = cur_tick
+        elseif cur_tick - throw_ready_tick >= 1 then
+            -- Arc has been clean for at least 1 tick — throw
+            cmd:set_buttons(cmd:get_buttons() | buttons.IN_ATTACK2)
+            -- Reset after throw so next activation re-acquires
+            locked_target    = nil
+            throw_ready_tick = 0
+        end
+    end
+end
+
+-- ─────────────────────────────────────────────
+-- HUD
+-- ─────────────────────────────────────────────
+
+function on_paint()
+    if not engine.is_in_game() then return end
+    if not cfg.enabled then return end
+
+    pcall(function()
+        local me = client.get_local_player()
+        if not me or not me:is_alive() then return end
+        if me:get_team() ~= TEAM_INFECTED then return end
+        if me:get_zombie_class() ~= CLASS_TANK then return end
+
+        local sw, sh = draw.get_screen_size()
+        if not sw or sw == 0 then return end
+
+        local key_held = input.is_key_down(cfg.activation)
+
+        local label
+        local r, g, b
+
+        if not key_held then
+            label = "Tank Rock: STANDBY"
+            r, g, b = 0.6, 0.6, 0.6
+        elseif locked_target then
+            label = "Tank Rock: LOCKED"
+            r, g, b = 1.0, 0.5, 0.1
+        else
+            label = "Tank Rock: SEARCHING"
+            r, g, b = 0.2, 1.0, 0.3
+        end
+
+        local tw  = draw.get_text_width(fonts.ESP, label)
+        local fh  = draw.get_font_height(fonts.ESP)
+        local pad = 4
+        local x   = math.floor((sw - tw) / 2)
+        local y   = 80   -- below autoshove HUD at y=55
+
+        draw.rect(x-pad, y-pad, tw+pad*2, fh+pad*2, 0, 0, 0, 0.6)
+        draw.outlined_rect(x-pad, y-pad, tw+pad*2, fh+pad*2, r, g, b, 1.0)
+        draw.string(fonts.ESP, x, y, r, g, b, 1.0, text_align.LEFT, label)
+    end)
+end
+
+-- ─────────────────────────────────────────────
+-- MENU
+-- ─────────────────────────────────────────────
+
+if not _G.tr_menu_registered then
+    _G.tr_menu_registered = true
+
+    menu.add_sub_tab("Aimbot", "Tank Rock", function()
+        local ok, err = pcall(function()
+            local c, v
+
+            imgui.separator()
+            imgui.text_colored(1.0, 0.3, 0.3, 1.0, "Tank Rock Aimbot v1.0")
+            imgui.separator()
+
+            c, v = imgui.checkbox("Enable", cfg.enabled)
+            if c then cfg.enabled = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(tank only)")
+
+            -- Status
+            if locked_target then
+                imgui.text_colored(1.0, 0.5, 0.1, 1.0, "  LOCKED onto target")
+            elseif input.is_key_down(cfg.activation) then
+                imgui.text_colored(0.2, 1.0, 0.3, 1.0, "  Searching...")
+            else
+                imgui.text_colored(0.5, 0.5, 0.5, 1.0, "  Standby — hold activation key")
+            end
+
+            imgui.spacing()
+            imgui.text_colored(0.7, 0.7, 1.0, 1.0, "Behavior")
+            imgui.separator()
+
+            c, v = imgui.checkbox("Auto Throw", cfg.auto_throw)
+            if c then cfg.auto_throw = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0,
+                "(inject IN_ATTACK2 when arc is clean)")
+
+            c, v = imgui.checkbox("Silent", cfg.silent)
+            if c then cfg.silent = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(camera doesn't move)")
+
+            imgui.spacing()
+            imgui.text_colored(0.7, 0.7, 1.0, 1.0, "Targeting")
+            imgui.separator()
+
+            c, v = imgui.slider_float("FOV", cfg.fov, 1.0, 180.0)
+            if c then cfg.fov = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(acquisition cone)")
+
+            c, v = imgui.slider_float("Max Distance", cfg.max_distance, 500.0, 6000.0)
+            if c then cfg.max_distance = v; save_cfg() end
+            imgui.same_line()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(units)")
+
+            imgui.spacing()
+            imgui.text_colored(1.0, 0.9, 0.5, 1.0, "Physics Tuning")
+            imgui.separator()
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0,
+                string.format("  Rock speed:    %.0f u/s", ROCK_SPEED))
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0,
+                string.format("  Grav scale:    %.2f", ROCK_GRAV_SCALE))
+            imgui.text_colored(0.6, 0.6, 0.6, 1.0,
+                string.format("  sv_gravity:    %.0f (live)", cached_gravity))
+            imgui.text_colored(0.5, 0.8, 1.0, 1.0,
+                "  If arc overshoots: reduce ROCK_SPEED in source")
+            imgui.text_colored(0.5, 0.8, 1.0, 1.0,
+                "  If arc undershoots: increase ROCK_SPEED in source")
+
+            imgui.spacing()
+            imgui.separator()
+            imgui.text("Hold activation key to lock + auto throw.")
+            imgui.text("Release key to cancel at any time.")
+            imgui.text("Aimbot (aimv2) yields automatically while active.")
+            imgui.text("Add to aimv2 after team check:")
+            imgui.text_colored(0.5, 1.0, 0.7, 1.0,
+                '  if client.get_shared_bool("tank_active", false) then return end')
+        end)
+
+        if not ok then
+            imgui.text_colored(1.0, 0.3, 0.3, 1.0, "menu error: " .. tostring(err))
+        end
+    end)
+end
+
+function on_unload()
+    _G.tr_menu_registered = nil
+    client.set_shared_bool("tank_active", false)
+    ps_clear()
+end
+
