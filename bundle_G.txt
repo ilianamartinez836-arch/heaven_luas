@@ -1,0 +1,343 @@
+
+
+===== FILE: nose we mouse5.lua =====
+
+local CHARGE_KEY = keys.KEY_C
+local MAX_CHARGE = 120
+local BURST_TICKS = 25
+local BURST_BASE = 18
+local BURST_PER_CHARGE = 0.35
+local BURST_MAX = 55
+local SPOOF_CHOKED = 80
+
+local CS_OFF = 4352236
+local CS_NETCHAN = 24
+local NC_ACK = 16
+local NC_CHOKED = 28
+
+local charge = 0
+local burst_left = 0
+local burst_value = 0
+local prev_charge_key = false
+local last_extra = -1
+
+local function get_nc()
+    local eng = modules.get_engine_base()
+    if not eng or eng == 0 then return 0 end
+    local cs = memory.read_int(eng + CS_OFF) or 0
+    if cs == 0 then return 0 end
+    local nc = memory.read_int(cs + CS_NETCHAN) or 0
+    if nc == 0 then nc = engine.get_netchan_ptr() or 0 end
+    return nc or 0
+end
+
+local function start_burst()
+    if charge <= 0 and burst_left > 0 then return end
+    if charge <= 0 then return end
+    local v = math.floor(BURST_BASE + charge * BURST_PER_CHARGE)
+    if v > BURST_MAX then v = BURST_MAX end
+    if v < 1 then v = 1 end
+    burst_value = v
+    burst_left = BURST_TICKS
+    charge = 0
+end
+
+local function apply_burst()
+    if burst_left <= 0 then return end
+    local extra = client.get_extra_commands() or 0
+    local use = burst_value
+    if type(extra) == "number" and extra > 0 then
+        use = extra + math.floor(burst_value * 0.5)
+        if use > BURST_MAX + 20 then use = BURST_MAX + 20 end
+    end
+    pcall(function() client.set_extra_commands(use) end)
+    local nc = get_nc()
+    if nc ~= 0 then
+        pcall(function()
+            memory.write_int(nc + NC_ACK, -1, false)
+            memory.write_int(nc + NC_CHOKED, SPOOF_CHOKED, false)
+        end)
+    end
+    burst_left = burst_left - 1
+    if burst_left <= 0 then
+        burst_value = 0
+    end
+end
+
+function on_cl_move_pre()
+    if not engine.is_in_game() then return end
+
+    local holding = input.is_key_down(CHARGE_KEY)
+    local extra = client.get_extra_commands()
+    if type(extra) ~= "number" then extra = -1 end
+
+    if holding then
+        if charge < MAX_CHARGE then
+            charge = charge + 1
+        end
+    end
+
+    if prev_charge_key and not holding then
+        start_burst()
+    end
+
+    if not holding and charge > 0 and type(extra) == "number" and extra > 0 then
+        if last_extra <= 0 or (extra > last_extra and last_extra >= 0) then
+            start_burst()
+        elseif last_extra <= 0 and extra > 0 then
+            start_burst()
+        end
+    end
+
+    if not holding and charge > 0 and last_extra <= 0 and extra > 0 then
+        start_burst()
+    end
+
+    if burst_left > 0 then
+        apply_burst()
+    end
+
+    last_extra = extra
+    prev_charge_key = holding
+end
+
+function on_unload()
+    pcall(function() client.set_extra_commands(0) end)
+    charge = 0
+    burst_left = 0
+end
+
+client.print("[CHARGE] C hold=carga silenciosa | suelta O usa RF/speed Heaven=burst")
+
+
+===== END: nose we mouse5.lua =====
+
+
+===== FILE: rapid fire old.lua =====
+
+ffi.cdef[[
+    void* GetModuleHandleA(const char* lpModuleName);
+    int VirtualProtect(void* lpAddress, size_t dwSize, uint32_t flNewProtect, uint32_t* lpflOldProtect);
+]]
+
+local PAGE_EXECUTE_READWRITE = 0x40
+local CS_OFFSET = 4352236
+local CS_NETCHAN = 24
+local CS_CHOKED = 19024
+local NC_CHOKED = 28
+
+local client_state = nil
+local net_channel = nil
+local kernel32 = ffi.load("kernel32")
+
+local function to_num(v)
+    if v == nil then return 0 end
+    if type(v) == "number" then return v end
+    local n = tonumber(v)
+    if n then return n end
+    local ok, n2 = pcall(function() return tonumber(ffi.cast("uintptr_t", v)) end)
+    if ok and n2 then return n2 end
+    return 0
+end
+
+local function BytePatch(address, byte, length)
+    local addr = to_num(address)
+    if addr == 0 then
+        client.print("[CHOKED] Invalid patch address")
+        return
+    end
+    local oldProtect = ffi.new("uint32_t[1]")
+    local address_ptr = ffi.cast("void*", addr)
+    if kernel32.VirtualProtect(address_ptr, length, PAGE_EXECUTE_READWRITE, oldProtect) == 0 then
+        client.print("[CHOKED] VirtualProtect failed")
+        return
+    end
+    local byte_ptr = ffi.cast("uint8_t*", address_ptr)
+    for i = 0, length - 1 do
+        byte_ptr[i] = byte
+    end
+    kernel32.VirtualProtect(address_ptr, length, oldProtect[0], oldProtect)
+    client.print(string.format("[CHOKED] Byte patch at 0x%X", addr))
+end
+
+local function get_engine_base()
+    if modules and modules.get_engine_base then
+        local b = to_num(modules.get_engine_base())
+        if b ~= 0 then return b end
+    end
+    local ok, h = pcall(function() return ffi.C.GetModuleHandleA("engine.dll") end)
+    if ok and h ~= nil then
+        return to_num(ffi.cast("uintptr_t", h))
+    end
+    return 0
+end
+
+local function InitializeAddresses()
+    local eng = get_engine_base()
+    if eng == 0 then
+        client.print("[CHOKED] engine.dll not found")
+        return false
+    end
+    local ok, cs = pcall(function()
+        return ffi.cast("uintptr_t*", eng + CS_OFFSET)[0]
+    end)
+    if not ok or not cs or to_num(cs) == 0 then
+        client.print("[CHOKED] client_state invalid")
+        return false
+    end
+    client_state = to_num(cs)
+    local ok2, nc = pcall(function()
+        return ffi.cast("uintptr_t*", client_state + CS_NETCHAN)[0]
+    end)
+    if not ok2 or not nc or to_num(nc) == 0 then
+        client.print("[CHOKED] net_channel invalid")
+        return false
+    end
+    net_channel = to_num(nc)
+    client.print(string.format("[CHOKED] client_state=0x%X netchan=0x%X", client_state, net_channel))
+    return true
+end
+
+function on_create_move(cmd, local_player)
+    if not cmd then return end
+    if client_state == nil or net_channel == nil then
+        if not InitializeAddresses() then return end
+    end
+    if input.is_key_down(keys.KEY_F) then
+        pcall(function()
+            ffi.cast("int*", client_state + CS_CHOKED)[0] = 8000
+        end)
+    end
+    if input.is_key_down(keys.KEY_X) then
+        pcall(function()
+            ffi.cast("int*", net_channel + NC_CHOKED)[0] = 700
+        end)
+    end
+end
+
+client.print("[CHOKED] loaded — hold F=chokedcmds 8000 | hold X=choked packets 700")
+
+
+===== END: rapid fire old.lua =====
+
+
+===== FILE: no steam logon.lua =====
+
+-- language: Lua, file: nsl.lua, target: Heaven Hook (L4D2)
+-- Port de aimware: 3 bytepatches en engine.dll.
+-- FIX: memory.pattern_scan devuelve un number, no cdata. No castear a uintptr_t.
+
+ffi.cdef[[
+    bool VirtualProtect(void* lpAddress, uint32_t dwSize, uint32_t flNewProtect, uint32_t* lpflOldProtect);
+]]
+
+local function log(s) pcall(client.print, "[nsl] " .. tostring(s)) end
+
+local patches = {
+    {
+        name  = "case1",
+        pat   = "83 BB 84 00 00 00 01 0F 84 D9 00 00 00",
+        off   = 7,
+        bytes = {0xE9, 0xDA, 0x00, 0x00, 0x00, 0x90},
+        check = 0x0F,  -- byte esperado en la posicion target (antes de parchear)
+    },
+    {
+        name  = "case6",
+        pat   = "83 BB 84 00 00 00 01 74 5E 8B 16",
+        off   = 7,
+        bytes = {0xEB},
+        check = 0x74,
+    },
+    {
+        name  = "case7/8",
+        pat   = "83 BB 84 00 00 00 01 74 3E 8B 0E",
+        off   = 7,
+        bytes = {0xEB},
+        check = 0x74,
+    },
+}
+
+local originals = {}
+
+-- pattern scan: la api de heaven devuelve un number directo
+local function pattern_scan(module, sig)
+    local fn = memory and memory.pattern_scan
+    if not fn then return nil end
+    local ok, result = pcall(fn, module, sig)
+    if not ok or not result then return nil end
+    -- ya es number. si por alguna razon es cdata, convertir.
+    if type(result) == "number" then
+        if result == 0 then return nil end
+        return result
+    end
+    local n
+    pcall(function() n = tonumber(ffi.cast("uintptr_t", result)) end)
+    if n and n ~= 0 then return n end
+    pcall(function() n = tonumber(result) end)
+    if n and n ~= 0 then return n end
+    return nil
+end
+
+local function read_bytes(addr_num, count)
+    local ptr = ffi.cast("uint8_t*", addr_num)
+    local out = {}
+    for i = 0, count - 1 do
+        out[#out + 1] = ptr[i]
+    end
+    return out
+end
+
+local function write_bytes(addr_num, bytes)
+    local old = ffi.new("uint32_t[1]")
+    if ffi.C.VirtualProtect(ffi.cast("void*", addr_num), #bytes, 0x40, old) == 0 then
+        return false
+    end
+    local ptr = ffi.cast("uint8_t*", addr_num)
+    for i, b in ipairs(bytes) do
+        ptr[i - 1] = b
+    end
+    ffi.C.VirtualProtect(ffi.cast("void*", addr_num), #bytes, old[0], old)
+    return true
+end
+
+local patched_count = 0
+
+for _, p in ipairs(patches) do
+    local found = pattern_scan("engine.dll", p.pat)
+    if not found then
+        log(p.name .. ": pattern no encontrado")
+    else
+        local target_num = found + p.off
+        local cur = read_bytes(target_num, #p.bytes)
+
+        if cur[1] ~= p.check then
+            log(string.format("%s: byte actual 0x%02X != 0x%02X — skip",
+                p.name, cur[1], p.check))
+        else
+            originals[p.name] = { addr = target_num, bytes = cur }
+            if write_bytes(target_num, p.bytes) then
+                patched_count = patched_count + 1
+                log(string.format("%s: parcheado en 0x%X", p.name, target_num))
+            else
+                log(p.name .. ": VirtualProtect fallo")
+            end
+        end
+    end
+end
+
+log(string.format("parcheados %d/%d", patched_count, #patches))
+
+function on_unload()
+    local restored = 0
+    for name, info in pairs(originals) do
+        if write_bytes(info.addr, info.bytes) then
+            restored = restored + 1
+        end
+    end
+    log(string.format("restaurados %d/%d", restored, patched_count))
+end
+
+log("cargado")
+
+
+===== END: no steam logon.lua =====

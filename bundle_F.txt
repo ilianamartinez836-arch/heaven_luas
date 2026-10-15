@@ -1,0 +1,305 @@
+
+
+===== FILE: AntiTracker.lua =====
+
+local VALID_NAMES = {
+    "chocoganpi."
+}
+
+local function has_value(tbl, value)
+    for _, v in ipairs(tbl) do
+        if v == value then
+            return true
+        end
+    end
+    return false
+end
+
+function on_paint()
+    if not engine.is_in_game() then
+        return
+    end
+    
+    local local_player = client.get_local_player()
+    if not local_player then
+        return
+    end
+    
+    local my_name = local_player:get_name()
+    if not my_name or my_name == "" or my_name == "unknown" then
+        return
+    end
+    
+    if has_value(VALID_NAMES, my_name) then
+        return
+    end
+    
+    local new_name = VALID_NAMES[1]
+    if new_name and new_name ~= "" then
+        client.execnormal('setinfo name "' .. new_name .. '"')
+    end
+end
+
+
+
+
+
+
+
+
+===== END: AntiTracker.lua =====
+
+
+===== FILE: Gray World.lua =====
+
+-- Gray World Textures + Perfect Directional Strafer combinados
+-- Código original intacto de ambos, sin cambios
+
+-- Gray World Textures (original)
+function on_find_material(material_name, texture_group)
+    if texture_group and string.find(texture_group, "World textures") then
+        -- return "dev/graygrid"
+        return "dev/graygrid"
+    end
+    return nil
+end
+
+
+
+===== END: Gray World.lua =====
+
+
+===== FILE: no shadows.lua =====
+
+-- language: Lua, file: no_shadows.lua, target: Heaven Hook (L4D2)
+-- Port de aimware: apaga sombras dinamicas y flash de linterna.
+-- Tecla K toggle. Sin menu. Restore al valor original en unload.
+
+local KEY = keys.KEY_K
+
+local cvar_ptr     = nil
+local original_val = 1
+local prev_down    = false
+local disabled     = false
+
+local function init()
+    local ok, ptr = pcall(cvar.find, "r_shadows")
+    if not ok or not ptr or ptr == 0 then
+        client.print("[shadows] r_shadows no encontrada")
+        return false
+    end
+    cvar_ptr = ptr
+    local ok2, val = pcall(cvar.get_int, cvar_ptr)
+    if ok2 and val then
+        original_val = val
+        disabled = (val == 0)
+    end
+    client.print("[shadows] original = " .. tostring(original_val) ..
+                 " | K para toggle")
+    return true
+end
+
+local function apply(v)
+    if cvar_ptr and cvar_ptr ~= 0 then
+        pcall(cvar.set_int, cvar_ptr, v)
+    end
+end
+
+function on_create_move(cmd, local_player)
+    if not cvar_ptr then return end
+
+    local down = false
+    pcall(function() down = input.is_key_down(KEY) end)
+
+    if down and not prev_down then
+        disabled = not disabled
+        apply(disabled and 0 or 1)
+        pcall(client.print, "[shadows] " .. (disabled and "OFF" or "ON"))
+    end
+    prev_down = down
+end
+
+function on_unload()
+    if cvar_ptr and cvar_ptr ~= 0 then
+        apply(original_val)
+        pcall(client.print, "[shadows] restaurado a " .. tostring(original_val))
+    end
+end
+
+init()
+
+
+===== END: no shadows.lua =====
+
+
+===== FILE: Simple Anti Aims.lua =====
+
+client.print("=== Tickrate Test ===")
+
+local function test_value(name, func)
+    local ok, result = pcall(func)
+
+    if ok then
+        if result ~= nil then
+            client.print(string.format("[OK] %s = %s", name, tostring(result)))
+            return result
+        else
+            client.print(string.format("[NIL] %s", name))
+        end
+    else
+        client.print(string.format("[ERROR] %s", name))
+    end
+
+    return nil
+end
+
+local function test_tickrate()
+    client.print("Testing tickrate functions...")
+
+    -- Test 1
+    local interval = test_value(
+        "engine.get_tick_interval()",
+        function()
+            return engine.get_tick_interval()
+        end
+    )
+
+    if interval and interval > 0 then
+        local tickrate = 1 / interval
+
+        client.print(string.format(
+            "[FOUND] Tick Interval: %.6f",
+            interval
+        ))
+
+        client.print(string.format(
+            "[FOUND] Tickrate: %.2f",
+            tickrate
+        ))
+    end
+
+    -- Test 2
+    local interval2 = test_value(
+        "engine.tick_interval",
+        function()
+            return engine.tick_interval
+        end
+    )
+
+    if interval2 and interval2 > 0 then
+        client.print(string.format(
+            "[FOUND] engine.tick_interval: %.6f",
+            interval2
+        ))
+
+        client.print(string.format(
+            "[FOUND] Tickrate: %.2f",
+            1 / interval2
+        ))
+    end
+
+    -- Test 3
+    local tickrate = test_value(
+        "engine.get_tickrate()",
+        function()
+            return engine.get_tickrate()
+        end
+    )
+
+    if tickrate and tickrate > 0 then
+        client.print(string.format(
+            "[FOUND] Direct Tickrate: %.2f",
+            tickrate
+        ))
+    end
+
+    client.print("=== Tickrate Test Finished ===")
+end
+
+test_tickrate()
+
+
+===== END: Simple Anti Aims.lua =====
+
+
+===== FILE: rapid fire gus.lua =====
+
+local IN_JUMP = 2
+local MOVETYPE_WALK = 2
+local IN_DUCK = 4
+local MOVETYPE_NOCLIP = 8
+local MOVETYPE_LADDER = 9
+local MOVETYPE_OBSERVER = 10
+
+local function normalize_rad(angle)
+    angle = angle % (2 * math.pi)
+    if angle > math.pi then
+        angle = angle - 2 * math.pi
+    elseif angle < -math.pi then
+        angle = angle + 2 * math.pi
+    end
+    return angle
+end
+
+local function angle_diff_rad(a1, a2)
+    return normalize_rad(a1 - a2)
+end
+
+local function apply_bhop(cmd, local_player)
+    local buttons = cmd:get_buttons()
+    if (buttons & IN_JUMP) ~= 0 then
+        buttons = buttons | IN_DUCK
+        if not local_player:is_on_ground() then
+            buttons = buttons & ~IN_JUMP
+        end
+        cmd:set_buttons(buttons)
+    end
+end
+
+local function apply_strafe(cmd, local_player)
+    local move_type = local_player:get_move_type()
+    if move_type == MOVETYPE_NOCLIP or move_type == MOVETYPE_LADDER or move_type == MOVETYPE_OBSERVER then
+        return
+    end
+    if local_player:is_on_ground() then return end
+
+    local velocity = local_player:get_velocity()
+    if not velocity then return end
+
+    local speed = math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y)
+    if speed < 2 then return end
+
+    local max_speed = 250
+    local air_accel = 300
+    local wish_speed = 300
+    local term = (wish_speed / air_accel) / max_speed * 100.0 / speed
+    local perfect_delta = 0.0
+    if term > -1.0 and term < 1.0 then
+        perfect_delta = math.acos(term)
+    end
+    if perfect_delta == 0.0 then return end
+
+    local view_angles = cmd:get_viewangles()
+    local yaw_rad = math.rad(view_angles.y)
+    local vel_dir = math.atan2(velocity.y, velocity.x) - yaw_rad
+    local wish_ang = math.atan2(-cmd:get_sidemove(), cmd:get_forwardmove())
+    local delta = angle_diff_rad(vel_dir, wish_ang)
+    local move_dir = delta < 0.0 and (vel_dir + perfect_delta) or (vel_dir - perfect_delta)
+
+    cmd:set_forwardmove(math.cos(move_dir) * 450)
+    cmd:set_sidemove(-math.sin(move_dir) * 450)
+end
+
+function on_copy_command_movement_pre(cmd, local_player)
+    if not cmd or not local_player then return end
+    if not local_player:is_alive() then return end
+    if local_player:get_move_type() ~= MOVETYPE_WALK then return end
+
+    apply_bhop(cmd, local_player)
+    apply_strafe(cmd, local_player)
+end
+
+
+
+
+===== END: rapid fire gus.lua =====
