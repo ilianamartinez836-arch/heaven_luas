@@ -1,0 +1,1888 @@
+
+
+===== FILE: 02_AimInfected.lua =====
+
+local config = {
+    enabled = true,
+    aimkey = keys.MOUSE5,
+    fov = 180.0,
+    smooth = 1.0,
+    max_distance = 4096.0,
+    target_head = true,
+    silent_aim = false,
+    vischeck = true,
+    auto_tank_hit = false,
+    auto_secondary = false,
+}
+
+local locked_entity = nil
+
+local function normalizeAngle(a)
+    while a > 180 do a = a - 360 end
+    while a < -180 do a = a + 360 end
+    return a
+end
+
+local function calcAngle(src, dst)
+    local dx = dst.x - src.x
+    local dy = dst.y - src.y
+    local dz = dst.z - src.z
+    local hyp = math.sqrt(dx * dx + dy * dy)
+    if hyp < 0.001 then hyp = 0.001 end
+    return vector.new(math.deg(math.atan2(-dz, hyp)), math.deg(math.atan2(dy, dx)), 0)
+end
+
+local function getFOV(view, aim)
+    local dx = normalizeAngle(aim.x - view.x)
+    local dy = normalizeAngle(aim.y - view.y)
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+local function smoothAngles(cur, target, smooth)
+    if not smooth or smooth <= 1.0 then return target end
+    local f = 1.0 / smooth
+    return vector.new(
+        cur.x + normalizeAngle(target.x - cur.x) * f,
+        cur.y + normalizeAngle(target.y - cur.y) * f,
+        0
+    )
+end
+
+local function is_visible(player)
+    if not config.vischeck then return true end
+    local ok, raw = pcall(entity.get_by_index_raw, player:get_index())
+    if not ok or not raw or raw == 0 then return true end
+    local ok2, dorm = pcall(entity.is_dormant, raw)
+    if not ok2 then return true end
+    return not dorm
+end
+
+local function get_aim_pos(player)
+    if config.target_head then
+        local ok, eye = pcall(function() return player:get_eye_position() end)
+        if ok and eye and eye.x then return eye end
+    end
+    local ok2, o = pcall(function() return player:get_origin() end)
+    if ok2 and o then
+        return vector.new(o.x, o.y, o.z + 40.0)
+    end
+    return nil
+end
+
+local function is_valid_locked(ent, eye_pos)
+    if not ent then return false end
+    local ok_a, alive = pcall(function() return ent:is_alive() end)
+    if not ok_a or not alive then return false end
+    local ok_t, team = pcall(function() return ent:get_team() end)
+    if not ok_t or team ~= 2 then return false end
+    if ent.is_incapacitated then
+        local ok_i, inc = pcall(function() return ent:is_incapacitated() end)
+        if ok_i and inc then return false end
+    end
+    local ok_o, o = pcall(function() return ent:get_origin() end)
+    if not ok_o or not o then return false end
+    if vector.distance(eye_pos, o) > config.max_distance then return false end
+    if not is_visible(ent) then return false end
+    return true
+end
+
+local function getBestTarget(local_player)
+    local eye_pos = local_player:get_eye_position()
+    if not eye_pos then return nil end
+    local view_angs = local_player:get_eye_angles()
+    if not view_angs then view_angs = vector.new(0, 0, 0) end
+    local local_idx = local_player:get_index()
+    local mc = engine.get_max_clients() or 32
+    local best = nil
+    local best_fov = config.fov
+
+    for i = 1, mc do
+        local player = entity.get_by_index(i)
+        if not player then goto continue end
+        if i == local_idx then goto continue end
+        local ok_a, alive = pcall(function() return player:is_alive() end)
+        if not ok_a or not alive then goto continue end
+        local ok_t, team = pcall(function() return player:get_team() end)
+        if not ok_t or team ~= 2 then goto continue end
+        if player.is_incapacitated then
+            local ok_i, inc = pcall(function() return player:is_incapacitated() end)
+            if ok_i and inc then goto continue end
+        end
+        if not is_visible(player) then goto continue end
+
+        local aim_pos = get_aim_pos(player)
+        if not aim_pos then goto continue end
+        local dist = vector.distance(eye_pos, player:get_origin())
+        if dist > config.max_distance then goto continue end
+
+        local aim_angle = calcAngle(eye_pos, aim_pos)
+        local fov = getFOV(view_angs, aim_angle)
+        if fov > best_fov then goto continue end
+
+        best_fov = fov
+        best = { player = player, aim_pos = aim_pos, aim_angle = aim_angle }
+        ::continue::
+    end
+    return best
+end
+
+function on_create_move(cmd, local_player)
+    if not cmd or not local_player then return end
+    if not local_player:is_alive() then return end
+    if not engine.is_in_game() then return end
+    if not config.enabled then
+        locked_entity = nil
+        return
+    end
+
+    if client.get_shared_bool then
+        local ok, tank_active = pcall(client.get_shared_bool, "tank_active", false)
+        if ok and tank_active then
+            locked_entity = nil
+            return
+        end
+    end
+
+    local team = local_player:get_team()
+    if team ~= 3 then
+        locked_entity = nil
+        return
+    end
+
+    if not input.is_key_down(config.aimkey) then
+        locked_entity = nil
+        return
+    end
+
+    local eye_pos = local_player:get_eye_position()
+    if not eye_pos then return end
+
+    if locked_entity and not is_valid_locked(locked_entity, eye_pos) then
+        locked_entity = nil
+    end
+
+    if not locked_entity then
+        local t = getBestTarget(local_player)
+        if not t then return end
+        locked_entity = t.player
+    end
+
+    local aim_pos = get_aim_pos(locked_entity)
+    if not aim_pos then
+        locked_entity = nil
+        return
+    end
+
+    local aim_angle = calcAngle(eye_pos, aim_pos)
+    local current = cmd:get_viewangles()
+    local final
+    if config.smooth > 1.0 then
+        final = smoothAngles(current, aim_angle, config.smooth)
+    else
+        final = aim_angle
+    end
+
+    final.x = math.clamp(normalizeAngle(final.x), -89.0, 89.0)
+    final.y = normalizeAngle(final.y)
+    final.z = 0
+
+    cmd:set_viewangles(final)
+    if not config.silent_aim then
+        engine.set_view_angles(final)
+
+local zc = 0
+if local_player.get_zombie_class then
+    local okz, z = pcall(function() return local_player:get_zombie_class() end)
+    if okz and z then zc = z end
+end
+
+local buttons = cmd:get_buttons()
+local IN_ATTACK = 1
+local IN_ATTACK2 = 2048
+
+if zc == 8 then
+    if config.auto_tank_hit then
+        cmd:set_buttons(buttons | IN_ATTACK)
+    end
+else
+    if config.auto_secondary then
+        cmd:set_buttons(buttons | IN_ATTACK2)
+    end
+end
+
+pcall(function()
+    menu.add_sub_tab("Aimbot", "Aim Infected", function()
+        imgui.text_colored(1.0, 0.4, 0.4, 1.0, "Aim Infected  |  HvH Rage")
+        imgui.text_colored(0.5, 0.5, 0.5, 1.0, "Key: MOUSE5 hold  |  vis = not dormant")
+        imgui.separator()
+        local c, v = imgui.checkbox("Enable", config.enabled)
+        if c then config.enabled = v end
+        c, v = imgui.slider_float("FOV", config.fov, 1.0, 180.0)
+        if c then config.fov = v end
+        c, v = imgui.slider_float("Smooth (1=snap)", config.smooth, 1.0, 20.0)
+        if c then config.smooth = v end
+        c, v = imgui.slider_float("Max distance", config.max_distance, 200.0, 8192.0)
+        if c then config.max_distance = v end
+        c, v = imgui.checkbox("Target head", config.target_head)
+        if c then config.target_head = v end
+        c, v = imgui.checkbox("Silent aim", config.silent_aim)
+        if c then config.silent_aim = v end
+        c, v = imgui.checkbox("Vischeck (dormant)", config.vischeck)
+        if c then config.vischeck = v end
+        c, v = imgui.checkbox("Auto hit Tank (M1 spam)", config.auto_tank_hit)
+        if c then config.auto_tank_hit = v end
+        c, v = imgui.checkbox("Auto secondary SI (M2 spam)", config.auto_secondary)
+        if c then config.auto_secondary = v end
+    end)
+end)
+
+function on_unload()
+    locked_entity = nil
+    client.print("[AimInfected] unloaded")
+end
+
+client.print("[AimInfected] loaded — MOUSE5 hold | dormant vis | FOV lock")
+
+
+
+===== FILE: 03_AutoShove.lua =====
+
+-- language: Lua, file: spec_esp.lua, target: Heaven Hook (L4D2)
+-- FIX: entity.get_all() devuelve TODO. Filtrar solo jugadores (index <= max_clients
+-- y que tengan player_info valido).
+
+local KEY = keys.KEY_K
+
+local COL_R, COL_G, COL_B, COL_A = 0.78, 0.59, 1.0, 1.0
+
+local FONT = fonts.ESP
+
+local spec_cache  = {}
+local last_scan   = 0.0
+local SCAN_RATE   = 0.2
+
+local prev_k = false
+local enabled = false
+
+-- world_to_screen
+local function w2s(x, y, z)
+    local ok, mat_ptr = pcall(engine.world_to_screen_matrix)
+    if not ok or not mat_ptr or mat_ptr == 0 then return nil end
+    local function rm(i)
+        local ok2, v = pcall(memory.read_float, mat_ptr + i * 4)
+        return ok2 and v or 0
+    end
+    local m00, m01, m02, m03 = rm(0), rm(1), rm(2), rm(3)
+    local m10, m11, m12, m13 = rm(4), rm(5), rm(6), rm(7)
+    local m30, m31, m32, m33 = rm(12), rm(13), rm(14), rm(15)
+    local w = m30 * x + m31 * y + m32 * z + m33
+    if w < 0.001 then return nil end
+    local inv = 1.0 / w
+    local sw, sh = 0, 0
+    pcall(function() sw, sh = engine.get_screen_size() end)
+    if not sw or sw == 0 then return nil end
+    local sx = (m00 * x + m01 * y + m02 * z + m03) * inv
+    local sy = (m10 * x + m11 * y + m12 * z + m13) * inv
+    return math.floor(sw / 2 + sx * sw / 2),
+           math.floor(sh / 2 - sy * sh / 2)
+end
+
+-- scan SOLO de jugadores
+local function scan_specs()
+    local now = os.clock()
+    if now - last_scan < SCAN_RATE then return end
+    last_scan = now
+
+    spec_cache = {}
+    local max_clients = 32
+    pcall(function() max_clients = engine.get_max_clients() end)
+    if not max_clients or max_clients <= 0 or max_clients > 64 then max_clients = 32 end
+
+    -- iterar SOLO los slots de jugador (1..max_clients)
+    for i = 1, max_clients do
+        local e
+        pcall(function() e = entity.get_by_index(i) end)
+        if e then
+            -- validar que sea un jugador real: existe player_info
+            local info
+            pcall(function() info = engine.get_player_info(i) end)
+            if info and info.name and info.name ~= "" then
+                local mode
+                pcall(function() mode = e:get_observer_mode() end)
+                if mode and mode > 0 then
+                    table.insert(spec_cache, { ent = e, idx = i, name = info.name })
+                end
+            end
+        end
+    end
+end
+
+local function get_origin(ent)
+    local o
+    pcall(function() o = ent:get_origin() end)
+    return o
+end
+
+local function draw_spec_esp()
+    if not enabled then return end
+
+    local me
+    pcall(function() me = client.get_local_player() end)
+    if not me then return end
+    local my_idx
+    pcall(function() my_idx = me:get_index() end)
+    if not my_idx then return end
+
+    local sw, sh = 0, 0
+    pcall(function() sw, sh = engine.get_screen_size() end)
+    if not sw or sw == 0 then return end
+
+    scan_specs()
+
+    local watching_me = {}
+    local free_cam    = {}
+
+    for _, entry in ipairs(spec_cache) do
+        local e, idx, name = entry.ent, entry.idx, entry.name
+        if idx ~= my_idx then
+            local tgt
+            pcall(function() tgt = e:get_observer_target() end)
+
+            if tgt then
+                local tgt_idx
+                pcall(function() tgt_idx = tgt:get_index() end)
+                if tgt_idx == my_idx then
+                    table.insert(watching_me, name)
+                elseif tgt_idx then
+                    local tgt_origin = get_origin(tgt)
+                    if tgt_origin then
+                        local sx, sy = w2s(tgt_origin.x, tgt_origin.y, tgt_origin.z + 100)
+                        if sx and sy then
+                            local tgt_name = "?"
+                            pcall(function()
+                                local ti = engine.get_player_info(tgt_idx)
+                                if ti and ti.name then tgt_name = ti.name end
+                            end)
+                            local txt = string.format("[SPEC] %s -> %s", name, tgt_name)
+                            local tw = 0
+                            pcall(function() tw = draw.get_text_width(FONT, txt) end)
+                            pcall(function()
+                                draw.string(FONT, sx - math.floor(tw/2) + 1, sy + 1,
+                                    0, 0, 0, 0.8, text_align.LEFT, txt)
+                            end)
+                            pcall(function()
+                                draw.string(FONT, sx - math.floor(tw/2), sy,
+                                    COL_R, COL_G, COL_B, COL_A, text_align.LEFT, txt)
+                            end)
+                        end
+                    end
+                end
+            else
+                -- sin target = free cam
+                local origin = get_origin(e)
+                if origin then
+                    table.insert(free_cam, {
+                        name = name,
+                        x = origin.x, y = origin.y, z = origin.z
+                    })
+                end
+            end
+        end
+    end
+
+    -- "watching me" arriba a la derecha
+    if #watching_me > 0 then
+        local y = 20
+        for _, n in ipairs(watching_me) do
+            local txt = "[!] " .. n .. " te esta mirando"
+            local tw = 0
+            pcall(function() tw = draw.get_text_width(FONT, txt) end)
+            pcall(function()
+                draw.string(FONT, sw - tw - 9, y + 1,
+                    0, 0, 0, 0.8, text_align.LEFT, txt)
+            end)
+            pcall(function()
+                draw.string(FONT, sw - tw - 10, y,
+                    1.0, 0.31, 0.31, 1.0, text_align.LEFT, txt)
+            end)
+            y = y + 18
+        end
+    end
+
+    for _, fc in ipairs(free_cam) do
+        local sx, sy = w2s(fc.x, fc.y, fc.z)
+        if sx and sy then
+            local txt = "[SPEC] " .. fc.name
+            local tw = 0
+            pcall(function() tw = draw.get_text_width(FONT, txt) end)
+            pcall(function()
+                draw.string(FONT, sx - math.floor(tw/2) + 1, sy + 1,
+                    0, 0, 0, 0.8, text_align.LEFT, txt)
+            end)
+            pcall(function()
+                draw.string(FONT, sx - math.floor(tw/2), sy,
+                    COL_R, COL_G, COL_B, COL_A, text_align.LEFT, txt)
+            end)
+            pcall(function()
+                draw.circle(sx, sy, 4, 16, COL_R, COL_G, COL_B, COL_A)
+            end)
+        end
+    end
+end
+
+function on_create_move(cmd, local_player)
+    local down = false
+    pcall(function() down = input.is_key_down(KEY) end)
+    if down and not prev_k then
+        enabled = not enabled
+        pcall(client.print, "[spec_esp] " .. (enabled and "ON" or "OFF"))
+    end
+    prev_k = down
+end
+
+function on_paint()
+    pcall(draw_spec_esp)
+end
+
+client.print("[spec_esp] cargado — K para toggle")
+
+
+===== FILE: 04_BhopStrafe.lua =====
+
+-- language: Lua, file: rage_strafer.lua, target: Heaven Hook (L4D2)
+-- Versión agresiva pero estable. Sin extra_commands, sin speed_bonus, sin overcorrect.
+-- Primero confirmamos que esto no crashea, después subimos.
+
+local IN_JUMP          = 2
+local MOVETYPE_WALK    = 2
+local MOVETYPE_NOCLIP  = 8
+local MOVETYPE_LADDER  = 9
+local MOVETYPE_OBSERVER = 10
+
+local MAX_SPEED  = 250.0
+local AIR_ACCEL  = 300.0
+local WISH_SPEED = 300.0
+local MAXMOVE    = 450.0
+
+local function norm_rad(a)
+    a = a % (2 * math.pi)
+    if a >  math.pi then a = a - 2 * math.pi end
+    if a < -math.pi then a = a + 2 * math.pi end
+    return a
+end
+local function angle_diff_rad(a1, a2) return norm_rad(a1 - a2) end
+
+local function apply_bhop(cmd, lp)
+    local b = cmd:get_buttons()
+    if (b & IN_JUMP) ~= 0 and not lp:is_on_ground() then
+        cmd:set_buttons(b & ~IN_JUMP)
+    end
+end
+
+local function apply_strafe(cmd, lp)
+    local mt = lp:get_move_type()
+    if mt == MOVETYPE_NOCLIP or mt == MOVETYPE_LADDER or mt == MOVETYPE_OBSERVER then return end
+    if lp:is_on_ground() then return end
+
+    local vel = lp:get_velocity()
+    if not vel then return end
+    local speed = math.sqrt(vel.x * vel.x + vel.y * vel.y)
+    if speed < 2.0 then return end
+
+    local term = (WISH_SPEED / AIR_ACCEL) / MAX_SPEED * 100.0 / speed
+    local perfect_delta = 0.0
+    if term > -1.0 and term < 1.0 then
+        perfect_delta = math.acos(term)
+    else
+        return   -- fuera de rango: no aplicamos strafe este tick
+    end
+
+    local va = cmd:get_viewangles()
+    if not va then return end
+
+    local yaw_rad = math.rad(va.y)
+    local vel_dir  = math.atan2(vel.y, vel.x) - yaw_rad
+    local wish_ang = math.atan2(-cmd:get_sidemove(), cmd:get_forwardmove())
+    local delta    = angle_diff_rad(vel_dir, wish_ang)
+    local move_dir = delta < 0.0 and (vel_dir + perfect_delta) or (vel_dir - perfect_delta)
+
+    -- si move_dir no es finito, skip
+    if move_dir ~= move_dir or move_dir == math.huge or move_dir == -math.huge then return end
+
+    cmd:set_forwardmove(math.cos(move_dir) * MAXMOVE)
+    cmd:set_sidemove(-math.sin(move_dir) * MAXMOVE)
+end
+
+function on_create_move(cmd, local_player)
+    if not cmd or not local_player then return end
+    if not local_player:is_alive() then return end
+    if local_player:get_move_type() ~= MOVETYPE_WALK then return end
+
+    local b = cmd:get_buttons()
+    if (b & IN_JUMP) ~= 0 then
+        apply_bhop(cmd, local_player)
+        apply_strafe(cmd, local_player)
+    end
+end
+
+
+===== FILE: aa.lua =====
+
+-- language: Lua, file: spinbot.lua, target: Heaven Hook (L4D2)
+-- Spinbot con correccion de movimiento. Tu personaje va hacia donde apuntas
+-- con WASD, no hacia donde rota el spin.
+
+local KEY = keys.KEY_K
+local IN_ATTACK = 1
+
+local cfg = {
+    enabled      = false,
+    spin_speed   = 15.0,
+    pitch        = -89.0,
+    fix_movement = true,   -- nueva opcion, ON por default
+}
+
+local spin_yaw  = 0.0
+local prev_down = false
+
+local function log(s) pcall(client.print, "[spinbot] " .. tostring(s)) end
+
+local function norm_yaw(y)
+    y = y % 360
+    if y > 180 then y = y - 360 end
+    if y < -180 then y = y + 360 end
+    return y
+end
+
+-- rota el forward/side por -delta para compensar la rotacion del yaw
+local function fix_movement(cmd, old_yaw, new_yaw)
+    if not cfg.fix_movement then return end
+
+    local delta_rad = math.rad(new_yaw - old_yaw)
+    local c = math.cos(delta_rad)
+    local s = math.sin(delta_rad)
+
+    local fm, sm = 0, 0
+    pcall(function()
+        fm = cmd:get_forwardmove()
+        sm = cmd:get_sidemove()
+    end)
+
+    if fm == 0 and sm == 0 then return end
+
+    -- aplicar rotacion inversa
+    local new_fm = fm * c - sm * s
+    local new_sm = fm * s + sm * c
+
+    pcall(function()
+        cmd:set_forwardmove(new_fm)
+        cmd:set_sidemove(new_sm)
+    end)
+end
+
+function on_create_move(cmd, local_player)
+    if not cmd then return end
+
+    local down = false
+    pcall(function() down = input.is_key_down(KEY) end)
+    if down and not prev_down then
+        cfg.enabled = not cfg.enabled
+        log(cfg.enabled and "ON" or "OFF")
+    end
+    prev_down = down
+
+    if not cfg.enabled then return end
+
+    local buttons = 0
+    pcall(function() buttons = cmd:get_buttons() end)
+    if (buttons & IN_ATTACK) ~= 0 then return end
+
+    -- guardar el yaw viejo antes de modificarlo
+    local old_yaw = 0.0
+    pcall(function()
+        local va = cmd:get_viewangles()
+        if va and va.y then old_yaw = va.y end
+    end)
+
+    -- avanzar spin
+    spin_yaw = norm_yaw(spin_yaw + cfg.spin_speed)
+
+    -- aplicar angulos nuevos
+    pcall(function()
+        cmd:set_viewangles(vector.new(cfg.pitch, spin_yaw, 0))
+    end)
+
+    -- corregir movimiento
+    fix_movement(cmd, old_yaw, spin_yaw)
+end
+
+-- ============================================================
+-- MENU
+-- ============================================================
+pcall(function()
+    menu.add_main_tab("Spinbot", function()
+        local c, v
+
+        imgui.text_colored(1.0, 0.4, 0.4, 1.0, "Spinbot AA")
+        imgui.text_colored(0.6, 0.6, 0.6, 1.0, "Keybind: K")
+        imgui.separator()
+
+        c, v = imgui.checkbox("Enable", cfg.enabled)
+        if c then cfg.enabled = v end
+
+        c, v = imgui.slider_float("Spin Speed", cfg.spin_speed, 5.0, 60.0)
+        if c then cfg.spin_speed = v end
+        imgui.same_line()
+        imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(deg/tick)")
+
+        c, v = imgui.slider_float("Pitch", cfg.pitch, -89.0, 89.0)
+        if c then cfg.pitch = v end
+        imgui.same_line()
+        imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(-89 = down)")
+
+        imgui.spacing()
+        c, v = imgui.checkbox("Fix Movement", cfg.fix_movement)
+        if c then cfg.fix_movement = v end
+        imgui.same_line()
+        imgui.text_colored(0.6, 0.6, 0.6, 1.0, "(WASD sigue funcionando)")
+
+        imgui.spacing()
+        imgui.separator()
+        imgui.text("yaw actual: " .. string.format("%.1f", spin_yaw))
+    end)
+end)
+
+function on_unload()
+    cfg.enabled = false
+    spin_yaw = 0.0
+    log("unloaded")
+end
+
+log("cargado — K para toggle")
+
+
+===== FILE: Adaptive No fall Damage.lua =====
+
+-- =============================================
+-- AUTO NO FALL DAMAGE MANAGER
+-- Solo cambia según equipo - Sin feedback
+-- =============================================
+
+local nofall = {
+    original_state = true,
+    last_team = 0
+}
+
+function on_create_move(cmd, local_player)
+    if not local_player then return end
+    if not engine.is_in_game() then return end
+
+    local current_team = local_player:get_team()
+    
+    if current_team == nofall.last_team then
+        return
+    end
+
+    nofall.last_team = current_team
+
+    if current_team == 3 then
+        -- Infectado → Desactivar No Fall Damage
+        nofall.original_state = cvar_vars.get_bool("vars_enable_no_fall")
+        cvar_vars.set_bool("vars_enable_no_fall", false)
+    elseif current_team == 2 then
+        -- Survivor → Restaurar estado original
+        cvar_vars.set_bool("vars_enable_no_fall", nofall.original_state)
+    end
+end
+
+function on_unload()
+    cvar_vars.set_bool("vars_enable_no_fall", nofall.original_state)
+end
+
+===== FILE: aiimware port 1 choke.lua =====
+
+local ffi = rawget(_G, "ffi")
+if not ffi then return end
+
+local function p(msg)
+    pcall(function() client.print(tostring(msg) .. "\n") end)
+end
+
+local function band(a, b)
+    local res, bitval = 0, 1
+    a, b = a or 0, b or 0
+    for _ = 0, 31 do
+        if (a % 2 == 1) and (b % 2 == 1) then res = res + bitval end
+        a = math.floor(a / 2)
+        b = math.floor(b / 2)
+        bitval = bitval * 2
+        if a == 0 and b == 0 then break end
+    end
+    return res
+end
+
+local function r32(addr)
+    local ok, v = pcall(memory.read_int, addr)
+    if ok then return v end
+    return nil
+end
+
+local function read_cstr(addr, n)
+    n = n or 32
+    if not addr or addr == 0 then return nil end
+    local t = {}
+    for i = 0, n - 1 do
+        local w = r32(addr + i)
+        if not w then break end
+        local b = band(w, 0xFF)
+        if b == 0 then break end
+        if b < 32 or b > 126 then break end
+        t[#t + 1] = string.char(b)
+    end
+    if #t == 0 then return nil end
+    return table.concat(t)
+end
+
+p("[last] start")
+
+local client_base = modules.get_client_base()
+if not client_base or client_base == 0 then
+    p("no client_base")
+    return
+end
+p("client_base = " .. tostring(client_base))
+
+-- buscar string "VClient016"
+local str_addr = nil
+local start = client_base + 0x1000
+local finish = client_base + 0xA00000
+for addr = start, finish, 4 do
+    local s = read_cstr(addr, 12)
+    if s == "VClient016" then
+        str_addr = addr
+        break
+    end
+end
+
+if not str_addr then
+    p("string VClient016 NOT found")
+    p("[last] done")
+    return
+end
+p("string @ " .. tostring(str_addr))
+
+-- buscar puntero a ese string (InterfaceReg.m_pName)
+local reg = nil
+for addr = start, finish, 4 do
+    local v = r32(addr)
+    if v == str_addr then
+        -- posible m_pName; createfn suele estar en addr-4, next en addr+4
+        local createfn = r32(addr - 4)
+        local nextptr = r32(addr + 4)
+        p(string.format("xref @ %s createfn=%s next=%s", tostring(addr), tostring(createfn), tostring(nextptr)))
+        if createfn and createfn > client_base and createfn < client_base + 0xA00000 then
+            reg = { name_ptr = addr, createfn = createfn, nextptr = nextptr }
+            break
+        end
+    end
+end
+
+if not reg then
+    p("InterfaceReg not found")
+    p("[last] done")
+    return
+end
+
+p("calling createfn...")
+local ok, ptr = pcall(function()
+    local fn = ffi.cast("void*(__cdecl*)()", reg.createfn)
+    return fn()
+end)
+
+local abs = 0
+if ok and ptr then
+    abs = tonumber(ffi.cast("uintptr_t", ptr)) or 0
+end
+p("createfn ok=" .. tostring(ok) .. " abs=" .. tostring(abs))
+
+if abs ~= 0 then
+    local okv, vt = pcall(function()
+        return ffi.cast("uintptr_t**", ptr)[0]
+    end)
+    if okv and vt then
+        for i = 20, 24 do
+            local ok2, f = pcall(function()
+                return tonumber(ffi.cast("uintptr_t", vt[i]))
+            end)
+            p(string.format("vtable[%d]=0x%X", i, (ok2 and f) or 0))
+        end
+    end
+end
+
+p("[last] done")
+
+
+===== FILE: aim byx infected.lua =====
+
+-- AimInfected ByxStorm → Heaven
+-- Hold key, Survivor más cercano, head, vis-check, 1-tick eye advance, cámara visible
+
+local cfg = {
+    enabled   = true,
+    key       = keys.MOUSE5,
+    max_dist  = 4096.0,
+    smooth    = 1.0,      -- 1 = instantáneo
+    vis_check = true,
+    head_z    = 64.0,     -- fallback si no hay hitbox API (altura cabeza aprox)
+}
+
+local TICK_INTERVAL = 1.0 / 30.0
+local MAX_ADVANCE   = 16.0
+
+local function normalize_angle(a)
+    while a > 180 do a = a - 360 end
+    while a < -180 do a = a + 360 end
+    return a
+end
+
+local function clamp_pitch(p)
+    if p > 89 then return 89 end
+    if p < -89 then return -89 end
+    return p
+end
+
+local function calc_angle(src, dst)
+    local dx = dst.x - src.x
+    local dy = dst.y - src.y
+    local dz = dst.z - src.z
+    local hyp = math.sqrt(dx * dx + dy * dy)
+    local pitch = math.deg(math.atan2(-dz, hyp))
+    local yaw   = math.deg(math.atan2(dy, dx))
+    return vector.new(pitch, yaw, 0)
+end
+
+local function vec_length(v)
+    return math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+end
+
+-- Avance 1 tick de velocidad, clamp 16u (igual Byx)
+local function eye_advance(lp, eye_real)
+    local vel = lp:get_velocity()
+    if not vel then return eye_real end
+
+    local ax = vel.x * TICK_INTERVAL
+    local ay = vel.y * TICK_INTERVAL
+    local az = vel.z * TICK_INTERVAL
+    local len = math.sqrt(ax * ax + ay * ay + az * az)
+
+    if len > MAX_ADVANCE and len > 0 then
+        local s = MAX_ADVANCE / len
+        ax, ay, az = ax * s, ay * s, az * s
+    end
+
+    return vector.new(eye_real.x + ax, eye_real.y + ay, eye_real.z + az)
+end
+
+-- Punto de cabeza: eye del survivor o origen + head_z
+local function get_head_pos(ent)
+    local ok, eye = pcall(function() return ent:get_eye_position() end)
+    if ok and eye and (eye.x ~= 0 or eye.y ~= 0 or eye.z ~= 0) then
+        return eye
+    end
+    local origin = ent:get_origin()
+    if not origin then return nil end
+    return vector.new(origin.x, origin.y, origin.z + cfg.head_z)
+end
+
+local function is_visible(eye_real, aim_pos, target_index)
+    if not cfg.vis_check then return true end
+
+    -- Heaven: trace.line si existe
+    local ok, result = pcall(function()
+        if type(trace) == "table" and type(trace.line) == "function" then
+            return trace.line(eye_real, aim_pos)
+        end
+        return nil
+    end)
+
+    if not ok or result == nil then
+        return true -- sin API de trace: no bloquear aim
+    end
+
+    if type(result) == "number" then
+        return result >= 0.97
+    end
+    if type(result) == "table" then
+        local frac = result.fraction or result.frac
+        if frac and frac < 0.97 then
+            local hit = result.entity_index or result.index
+            if hit and hit == target_index then return true end
+            return false
+        end
+        return true
+    end
+    return true
+end
+
+local function is_valid_survivor(ent, local_index, local_team)
+    if not ent then return false end
+    local idx = ent:get_index()
+    if not idx or idx == local_index then return false end
+    if not ent:is_alive() then return false end
+
+    local team = ent:get_team()
+    if team == local_team then return false end
+    if team ~= 2 then return false end -- solo Survivors
+
+    local ok_g, ghost = pcall(function() return ent:is_ghost() end)
+    if ok_g and ghost then return false end
+
+    local ok_i, incap = pcall(function() return ent:is_incapacitated() end)
+    if ok_i and incap then return false end
+
+    return true
+end
+
+local function find_best(lp, eye_real, eye_aim)
+    local local_index = lp:get_index()
+    local local_team  = lp:get_team()
+    local max_c = engine.get_max_clients() or 32
+
+    local best_dist = cfg.max_dist
+    local best_aim  = nil
+
+    for i = 1, max_c do
+        local ent = entity.get_by_index(i)
+        if is_valid_survivor(ent, local_index, local_team) then
+            local aim_pos = get_head_pos(ent)
+            if aim_pos then
+                local dist = vector.distance(eye_aim, aim_pos)
+                if dist < best_dist then
+                    if is_visible(eye_real, aim_pos, i) then
+                        best_dist = dist
+                        best_aim  = aim_pos
+                    end
+                end
+            end
+        end
+    end
+
+    return best_aim
+end
+
+function on_create_move(cmd, local_player)
+    if not cfg.enabled or not cmd or not local_player then return end
+    if not local_player:is_alive() then return end
+    if local_player:get_team() ~= 3 then return end -- Infected
+    if not input.is_key_down(cfg.key) then return end
+
+    local eye_real = local_player:get_eye_position()
+    if not eye_real then return end
+
+    local eye_aim = eye_advance(local_player, eye_real)
+    local target  = find_best(local_player, eye_real, eye_aim)
+    if not target then return end
+
+    local view = cmd:get_viewangles()
+    local ang  = calc_angle(eye_aim, target)
+
+    local t = (cfg.smooth <= 1.0) and 1.0 or (1.0 / cfg.smooth)
+    local dx = normalize_angle(ang.x - view.x)
+    local dy = normalize_angle(ang.y - view.y)
+
+    local final = vector.new(
+        clamp_pitch(view.x + dx * t),
+        normalize_angle(view.y + dy * t),
+        0
+    )
+
+    -- Byx: NO silent — cámara real
+    cmd:set_viewangles(final)
+    engine.set_view_angles(final)
+end
+
+menu.add_main_tab("AimInfected", function()
+    local ch, val
+
+    ch, val = imgui.checkbox("Enabled", cfg.enabled)
+    if ch then cfg.enabled = val end
+
+    ch, val = imgui.slider_float("Max distance", cfg.max_dist, 500.0, 8192.0)
+    if ch then cfg.max_dist = val end
+
+    ch, val = imgui.slider_float("Smooth (1=snap)", cfg.smooth, 1.0, 20.0)
+    if ch then cfg.smooth = val end
+
+    ch, val = imgui.checkbox("Visibility check", cfg.vis_check)
+    if ch then cfg.vis_check = val end
+
+    ch, val = imgui.slider_float("Head Z fallback", cfg.head_z, 40.0, 80.0)
+    if ch then cfg.head_z = val end
+
+    imgui.separator()
+    imgui.text("Hold MOUSE5 | Infected only | visible camera")
+    imgui.text_colored(0.5, 0.5, 0.5, 1.0, "Logica Byx: dist + head + vis + eye advance")
+    imgui["end"]()
+end)
+
+client.print("[AimInfected] ByxStorm port — hold M5, head, vis, 1-tick advance")
+
+===== FILE: Aim Tank.lua =====
+
+local config = {
+    enabled = true,
+    key = keys.MOUSE5,      -- Mantener Mouse5
+    range = 8192,         -- Máximo alcance
+    target_bots = true,     -- Activado
+    target_players = true,  -- Activado
+    auto_hit = true,        -- Activado
+    auto_hit_distance = 165
+}
+
+local function is_survivor_valid(local_player, player)
+    if not player or not player:is_alive() then return false end
+    if player:get_index() == local_player:get_index() then return false end
+    if player:get_team() ~= 2 then return false end
+
+    if player.is_incapacitated and player:is_incapacitated() then
+        return false
+    end
+
+    local name = player:get_name() or ""
+    local is_bot = name == "" or string.find(string.lower(name), "bot")
+
+    if is_bot and not config.target_bots then return false end
+    if not is_bot and not config.target_players then return false end
+
+    return true
+end
+
+local function find_closest_survivor(local_player)
+    if not local_player or not local_player:is_alive() then return nil, 0 end
+    if local_player:get_team() ~= 3 then return nil, 0 end
+
+    local eye_pos = local_player:get_eye_position()
+    local best_target = nil
+    local best_dist = config.range
+
+    local max_clients = engine.get_max_clients()
+
+    for i = 1, max_clients do
+        local player = entity.get_by_index(i)
+
+        if is_survivor_valid(local_player, player) then
+            local origin = player:get_origin()
+            local dist = vector.distance(eye_pos, origin)
+
+            if dist < best_dist then
+                best_dist = dist
+                best_target = player
+            end
+        end
+    end
+
+    return best_target, best_dist
+end
+
+local function calc_angle(src, dst)
+    local delta = vector.new(
+        dst.x - src.x,
+        dst.y - src.y,
+        dst.z - src.z
+    )
+
+    local hyp = math.sqrt(delta.x * delta.x + delta.y * delta.y)
+    if hyp < 0.001 then hyp = 0.001 end
+
+    local pitch = math.deg(math.atan2(-delta.z, hyp))
+    local yaw = math.deg(math.atan2(delta.y, delta.x))
+
+    return vector.new(pitch, yaw, 0)
+end
+
+local function normalize_angle(angle)
+    while angle > 180 do angle = angle - 360 end
+    while angle < -180 do angle = angle + 360 end
+    return angle
+end
+
+function on_create_move(cmd, local_player)
+    if not config.enabled then return end
+    if not local_player or not local_player:is_alive() then return end
+    if not engine.is_in_game() then return end
+    if local_player:get_team() ~= 3 then return end
+
+    -- Mouse5 mantenido
+    if not input.is_key_down(config.key) then
+        return
+    end
+
+    local target, dist = find_closest_survivor(local_player)
+    if not target then return end
+
+    local eye_pos = local_player:get_eye_position()
+    local target_pos = target:get_origin()
+
+    target_pos = vector.new(
+        target_pos.x,
+        target_pos.y,
+        target_pos.z + 45
+    )
+
+    local angles = calc_angle(eye_pos, target_pos)
+
+    angles.x = normalize_angle(
+        math.max(-89, math.min(89, angles.x))
+    )
+
+    angles.y = normalize_angle(angles.y)
+
+    cmd:set_viewangles(angles)
+    engine.set_view_angles(angles)
+
+    if config.auto_hit and dist <= config.auto_hit_distance then
+        local max_hp = local_player:get_max_health() or 0
+
+        if max_hp >= 3000 then
+            local buttons = cmd:get_buttons()
+            cmd:set_buttons(buttons | buttons.IN_ATTACK)
+        end
+    end
+end
+
+
+
+
+===== FILE: antiaim.lua =====
+
+--Made by Rarita (Lucky\Aika\Mambo)
+--Heaven version: 1.0.2
+local aa = {
+    spin_speed = 130.0, 
+    spin_angle = 0.0,
+    pitch_value = 89.0, 
+    flip_interval = 20, 
+    tick_count = 0,
+    do_desync_on_next = false,
+}
+
+if client.get_shared_bool("aa_enabled", nil) == nil then
+    client.set_shared_bool("aa_enabled", false)
+    client.set_shared_bool("aa_spin_enabled", true)
+    client.set_shared_bool("aa_pitch_up", false)
+    client.set_shared_int("aa_spin_speed", 130)
+    client.set_shared_int("aa_pitch_value", 89)
+    client.set_shared_int("aa_flip_interval", 20)
+end
+
+local function normalize_angle(a)
+    while a > 180 do a = a - 360 end
+    while a < -180 do a = a + 360 end
+    return a
+end
+
+function on_create_move_prediction(cmd, local_player)
+    if not cmd or not local_player then
+        client.set_send_packet(true)
+        return
+    end
+
+    if not local_player:is_alive() then
+        aa.tick_count = 0
+        aa.do_desync_on_next = false
+        client.set_send_packet(true)
+        return
+    end
+
+    local enabled = client.get_shared_bool("aa_enabled", false)
+    local spin_enabled = client.get_shared_bool("aa_spin_enabled", true)
+    local pitch_up = client.get_shared_bool("aa_pitch_up", false)
+    
+ 
+    local spin_speed = client.get_shared_int("aa_spin_speed", 130)
+    local pitch_value = client.get_shared_int("aa_pitch_value", 89)
+    local flip_interval = client.get_shared_int("aa_flip_interval", 20)
+
+    local IN_USE = 32
+    local IN_ATTACK = 1
+    local IN_ATTACK2 = 2048
+    local MOVETYPE_LADDER = 9
+    
+    local move_type = local_player:get_move_type()
+    local on_ladder = (move_type == MOVETYPE_LADDER)
+    local buttons = cmd:get_buttons()
+
+    if (not enabled)
+       or ((buttons & (IN_USE | IN_ATTACK | IN_ATTACK2)) ~= 0)
+       or on_ladder then
+        client.set_send_packet(true)
+        return
+    end
+
+    aa.tick_count = aa.tick_count + 1
+
+    if spin_enabled and spin_speed ~= 0 then
+        aa.spin_angle = aa.spin_angle + spin_speed
+        aa.spin_angle = normalize_angle(aa.spin_angle)
+    end
+
+    if enabled then
+        if (aa.tick_count % flip_interval) == 0 then
+            aa.do_desync_on_next = true
+        end
+    else
+        aa.do_desync_on_next = false
+    end
+
+    local angles = cmd:get_viewangles()
+
+    if pitch_up then
+        angles.x = pitch_value
+    end
+
+    if aa.do_desync_on_next then
+        angles.y = normalize_angle(angles.y + 120.0)
+        client.set_send_packet(false)
+        aa.do_desync_on_next = false
+    else
+        if spin_enabled then
+            angles.y = aa.spin_angle
+        end
+        client.set_send_packet(true)
+    end
+
+    cmd:set_viewangles(angles)
+end
+
+
+menu.add_main_tab("AntiAims", function()
+    imgui.text("Anti-Aim Test (single-tick desync)")
+    imgui.separator()
+
+    local changed, val = imgui.checkbox("Enabled", client.get_shared_bool("aa_enabled", false))
+    if changed then client.set_shared_bool("aa_enabled", val) end
+
+    imgui.separator()
+    local changed, val = imgui.checkbox("Spin Enabled", client.get_shared_bool("aa_spin_enabled", true))
+    if changed then client.set_shared_bool("aa_spin_enabled", val) end
+
+    local current_speed = client.get_shared_int("aa_spin_speed", 130)
+    local _, int_speed = imgui.slider_int("Spin Speed (deg/tick)", current_speed, 0, 180)
+    if int_speed ~= current_speed then
+        client.set_shared_int("aa_spin_speed", int_speed)
+    end
+
+    imgui.separator()
+    local changed, val = imgui.checkbox("Pitch Enable", client.get_shared_bool("aa_pitch_up", false))
+    if changed then client.set_shared_bool("aa_pitch_up", val) end
+
+    local current_pitch = client.get_shared_int("aa_pitch_value", 89)
+    local changed, new_pitch = imgui.slider_int("Pitch Value", current_pitch, -89, 89)
+    if changed then
+        client.set_shared_int("aa_pitch_value", new_pitch)
+    end
+
+    imgui.separator()
+    local current_interval = client.get_shared_int("aa_flip_interval", 20)
+    local _, new_interval = imgui.slider_int("Flip Interval (ticks)", current_interval, 1, 60)
+    if new_interval ~= current_interval then
+        client.set_shared_int("aa_flip_interval", new_interval)
+    end
+
+
+    imgui["end"]()
+end)
+
+===== FILE: AntiTracker.lua =====
+
+local VALID_NAMES = {
+    "chocoganpi."
+}
+
+local function has_value(tbl, value)
+    for _, v in ipairs(tbl) do
+        if v == value then
+            return true
+        end
+    end
+    return false
+end
+
+function on_paint()
+    if not engine.is_in_game() then
+        return
+    end
+    
+    local local_player = client.get_local_player()
+    if not local_player then
+        return
+    end
+    
+    local my_name = local_player:get_name()
+    if not my_name or my_name == "" or my_name == "unknown" then
+        return
+    end
+    
+    if has_value(VALID_NAMES, my_name) then
+        return
+    end
+    
+    local new_name = VALID_NAMES[1]
+    if new_name and new_name ~= "" then
+        client.execnormal('setinfo name "' .. new_name .. '"')
+    end
+end
+
+
+
+
+
+
+
+
+===== FILE: auto shove byx.lua =====
+
+-- AutoShove ByxStorm → Heaven
+-- Shove automático en rango + cono; aim al target con corrección de movimiento
+
+local IN_ATTACK2 = 2048  -- 1 << 11
+
+local cfg = {
+    enabled        = true,
+    key            = 0,          -- 0 = siempre si enabled
+    hold_mode      = true,
+    range          = 75.0,
+    cone           = 90.0,       -- medio-ángulo
+    aim_at_target  = true,
+    vis_check      = false,      -- true si tienes trace.line fiable
+    target_specials  = true,
+    target_commons   = false,    -- limitado en pure Lua (ver nota)
+    target_tank      = false,
+    target_witch     = false,
+    target_survivors = false,
+}
+
+local stats = { shoves = 0, last_dist = 0.0 }
+
+local CID = {
+    CTerrorPlayer = 232,
+    SurvivorBot   = 275,
+    Hunter = 263, Smoker = 270, Boomer = 0,
+    Spitter = 272, Jockey = 265, Charger = 99,
+    Tank = 276, Witch = 277, Infected = 264,
+}
+
+local function normalize_angle(a)
+    while a > 180 do a = a - 360 end
+    while a < -180 do a = a + 360 end
+    return a
+end
+
+local function clamp_pitch(p)
+    if p > 89 then return 89 end
+    if p < -89 then return -89 end
+    return p
+end
+
+local function calc_angle(src, dst)
+    local dx = dst.x - src.x
+    local dy = dst.y - src.y
+    local dz = dst.z - src.z
+    local hyp = math.sqrt(dx * dx + dy * dy)
+    return vector.new(
+        math.deg(math.atan2(-dz, hyp)),
+        math.deg(math.atan2(dy, dx)),
+        0
+    )
+end
+
+local function angle_forward(angles)
+    local p = math.rad(angles.x)
+    local y = math.rad(angles.y)
+    local cp, sp = math.cos(p), math.sin(p)
+    local cy, sy = math.cos(y), math.sin(y)
+    return vector.new(cp * cy, cp * sy, -sp)
+end
+
+local function get_class_id(ent)
+    local ok, id = pcall(function() return ent:get_class_id() end)
+    if ok and id then return id end
+    return -1
+end
+
+local function get_zombie_class(ent)
+    local ok, z = pcall(function() return ent:get_zombie_class() end)
+    if ok and z then return z end
+    return -1
+end
+
+-- Centro aprox: origen + 36z (torso) — Byx usa mins/maxs; aquí no siempre hay netvars
+local function collision_center(ent)
+    local o = ent:get_origin()
+    if not o then return nil end
+    return vector.new(o.x, o.y, o.z + 36.0)
+end
+
+local function want_shove(ent, local_team)
+    if not ent or not ent:is_alive() then return false end
+    local team = ent:get_team()
+    if team == local_team then return false end
+
+    local cid = get_class_id(ent)
+    local zc  = get_zombie_class(ent)
+
+    -- Jugadores / bots
+    if cid == CID.CTerrorPlayer or cid == CID.SurvivorBot or cid == -1 then
+        if team == 2 then
+            return cfg.target_survivors
+        end
+        if team == 3 then
+            if zc == 8 or cid == CID.Tank then
+                return cfg.target_tank
+            end
+            return cfg.target_specials
+        end
+    end
+
+    if cid == CID.Hunter or cid == CID.Smoker or cid == CID.Boomer
+        or cid == CID.Spitter or cid == CID.Jockey or cid == CID.Charger then
+        return cfg.target_specials
+    end
+    if cid == CID.Tank then return cfg.target_tank end
+    if cid == CID.Witch then return cfg.target_witch end
+    if cid == CID.Infected then return cfg.target_commons end
+
+    -- Fallback por team si class_id no viene
+    if team == 2 then return cfg.target_survivors end
+    if team == 3 then
+        if zc == 8 then return cfg.target_tank end
+        return cfg.target_specials
+    end
+    return false
+end
+
+local function is_visible(eye, pos, target_idx)
+    if not cfg.vis_check then return true end
+    local ok, result = pcall(function()
+        if type(trace) == "table" and type(trace.line) == "function" then
+            return trace.line(eye, pos)
+        end
+        return nil
+    end)
+    if not ok or result == nil then return true end
+    if type(result) == "number" then return result >= 0.97 end
+    if type(result) == "table" then
+        local frac = result.fraction or result.frac
+        if frac and frac < 0.97 then
+            local hit = result.entity_index or result.index
+            if hit and hit == target_idx then return true end
+            return false
+        end
+    end
+    return true
+end
+
+local function key_ok()
+    if cfg.key == 0 then return true end
+    if not cfg.hold_mode then return true end
+    -- key como número de tecla Heaven: usar keys.* si el usuario pone 0 o MOUSE5
+    if type(cfg.key) == "number" and cfg.key ~= 0 then
+        return input.is_key_down(cfg.key)
+    end
+    return input.is_key_down(keys.MOUSE5)
+end
+
+function on_create_move(cmd, local_player)
+    if not cfg.enabled or not cmd or not local_player then return end
+    if not local_player:is_alive() then return end
+    if not key_ok() then return end
+
+    local eye = local_player:get_eye_position()
+    if not eye then return end
+
+    local view = cmd:get_viewangles()
+    local forward = angle_forward(view)
+    local local_team = local_player:get_team()
+    local local_idx  = local_player:get_index()
+
+    local cos_cone = math.cos(math.rad(math.min(cfg.cone, 179.0)))
+
+    local best_ent, best_pos, best_dist, best_idx = nil, nil, cfg.range, nil
+
+    local max_c = engine.get_max_clients() or 32
+    -- Si commons/witch: intentar más índices (best-effort)
+    local n_end = max_c
+    if cfg.target_commons or cfg.target_witch then
+        n_end = math.max(max_c, 256)
+    end
+
+    for i = 1, n_end do
+        local ent = entity.get_by_index(i)
+        if ent and i ~= local_idx and want_shove(ent, local_team) then
+            local pos = collision_center(ent)
+            if pos then
+                local dx = pos.x - eye.x
+                local dy = pos.y - eye.y
+                local dz = pos.z - eye.z
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if dist > 0 and dist < best_dist then
+                    local inv = 1.0 / dist
+                    local dot = (dx * inv) * forward.x
+                              + (dy * inv) * forward.y
+                              + (dz * inv) * forward.z
+                    if dot >= cos_cone then
+                        best_ent  = ent
+                        best_pos  = pos
+                        best_dist = dist
+                        best_idx  = i
+                    end
+                end
+            end
+        end
+    end
+
+    if not best_ent then return end
+    if not is_visible(eye, best_pos, best_idx) then return end
+
+    if cfg.aim_at_target then
+        local ang = calc_angle(eye, best_pos)
+        ang.x = clamp_pitch(ang.x)
+        ang.y = normalize_angle(ang.y)
+
+        -- Silent move fix (Byx): re-proyectar forward/side respecto al nuevo yaw
+        local fm = cmd:get_forwardmove()
+        local sm = cmd:get_sidemove()
+        if fm ~= 0 or sm ~= 0 then
+            local yd = math.rad(ang.y - view.y)
+            local c, s = math.cos(yd), math.sin(yd)
+            cmd:set_forwardmove(fm * c - sm * s)
+            cmd:set_sidemove(fm * s + sm * c)
+        end
+
+        cmd:set_viewangles(ang)
+        -- No engine.set_view_angles → silent shove (cámara no salta)
+    end
+
+    local buttons = cmd:get_buttons()
+    cmd:set_buttons(buttons | IN_ATTACK2)
+
+    stats.shoves = stats.shoves + 1
+    stats.last_dist = best_dist
+end
+
+menu.add_main_tab("AutoShove", function()
+    local ch, val
+
+    ch, val = imgui.checkbox("Enabled", cfg.enabled)
+    if ch then cfg.enabled = val end
+
+    ch, val = imgui.checkbox("Hold mode (key)", cfg.hold_mode)
+    if ch then cfg.hold_mode = val end
+
+    imgui.text_colored(0.55, 0.55, 0.55, 1.0, "key=0 siempre | usa MOUSE5 si hold y key!=0")
+    -- Simplificado: toggle hold con MOUSE5 cuando hold_mode y queremos tecla
+    ch, val = imgui.checkbox("Use MOUSE5 as key", cfg.key ~= 0)
+    if ch then cfg.key = val and keys.MOUSE5 or 0 end
+
+    ch, val = imgui.slider_float("Range", cfg.range, 40.0, 120.0)
+    if ch then cfg.range = val end
+
+    ch, val = imgui.slider_float("Cone (half deg)", cfg.cone, 15.0, 180.0)
+    if ch then cfg.cone = val end
+
+    ch, val = imgui.checkbox("Aim at target (silent)", cfg.aim_at_target)
+    if ch then cfg.aim_at_target = val end
+
+    ch, val = imgui.checkbox("Vis check", cfg.vis_check)
+    if ch then cfg.vis_check = val end
+
+    imgui.separator()
+    imgui.text("Targets")
+    ch, val = imgui.checkbox("Specials", cfg.target_specials)
+    if ch then cfg.target_specials = val end
+    ch, val = imgui.checkbox("Commons", cfg.target_commons)
+    if ch then cfg.target_commons = val end
+    ch, val = imgui.checkbox("Tank", cfg.target_tank)
+    if ch then cfg.target_tank = val end
+    ch, val = imgui.checkbox("Witch", cfg.target_witch)
+    if ch then cfg.target_witch = val end
+    ch, val = imgui.checkbox("Survivors", cfg.target_survivors)
+    if ch then cfg.target_survivors = val end
+
+    imgui.separator()
+    imgui.text(string.format("Shoves: %d | Last dist: %.1f", stats.shoves, stats.last_dist))
+    imgui["end"]()
+end)
+
+client.print("[AutoShove] ByxStorm port — range/cone/aim | tab AutoShove")
+
+===== FILE: Auto Shove.lua =====
+
+-- autoshove_creator_no_imgui.lua - Auto Shove sin menú + silent del primer Lua + delay real
+-- Arreglado para no giro loco (delay con curtime, solo shove cuando pase tiempo)
+
+local PI = 3.14159
+
+-- Helpers del creador
+local function normalize_angle(angle)
+    while angle > 180 do angle = angle - 360 end
+    while angle < -180 do angle = angle + 360 end
+    return angle
+end
+
+local function calc_angle(src, dst)
+    local delta = vector.new(dst.x - src.x, dst.y - src.y, dst.z - src.z)
+    local hyp = math.sqrt(delta.x^2 + delta.y^2)
+    local pitch = math.deg(math.atan2(-delta.z, hyp))
+    local yaw = math.deg(math.atan2(delta.y, delta.x))
+    return vector.new(pitch, yaw, 0)
+end
+
+local function get_fov(view_angles, aim_angles)
+    local dx = normalize_angle(aim_angles.x - view_angles.x)
+    local dy = normalize_angle(aim_angles.y - view_angles.y)
+    return math.sqrt(dx*dx + dy*dy)
+end
+
+-- Configuraciones predeterminadas al cargar
+if client.get_shared_bool("as_enable", nil) == nil then
+    client.set_shared_bool("as_enable", true)
+    client.set_shared_float("as_range", 90.500)
+    client.set_shared_float("as_delay", 0.027) -- segundos reales
+    client.set_shared_bool("as_silent", true)
+    client.set_shared_bool("as_legit", false)
+    client.set_shared_bool("as_hunter", true)
+    client.set_shared_bool("as_jockey", true)
+    client.set_shared_bool("as_smoker", true)
+    client.set_shared_bool("as_spitter", true)
+    client.set_shared_bool("as_boomer", true)
+end
+
+-- Variables para delay real (como el primer Lua)
+local last_shove_time = 0.0
+
+function on_create_move_prediction(cmd, local_player)
+    local enabled = client.get_shared_bool("as_enable", true)
+    if not enabled or not local_player or not local_player:is_alive() or local_player:get_team() ~= 2 then return end
+    
+    local curtime = get_global_vars().curtime
+    local delay = client.get_shared_float("as_delay", 0.027)
+    
+    -- Delay real (solo shove si pasó el tiempo)
+    if curtime - last_shove_time < delay then return end
+    
+    local range = client.get_shared_float("as_range", 90.500)
+    local silent = client.get_shared_bool("as_silent", true)
+    local legit = client.get_shared_bool("as_legit", false)
+    local eye_pos = local_player:get_eye_position()
+    local view_angles = local_player:get_eye_angles()
+    local buttons = cmd:get_buttons()
+    
+    local best_fov = math.huge
+    local best_target = nil
+    local max_entities = math.max(engine.get_max_clients(), 64)
+    
+    for i = 1, max_entities do
+        local ent = entity.get_by_index(i)
+        if ent and ent:get_index() ~= local_player:get_index() then
+            local zclass = ent:get_zombie_class()
+            if ent:is_alive() and ent:get_team() == 3 and not ent:is_ghost() and
+               ((zclass == 3 and client.get_shared_bool("as_hunter", true)) or
+                (zclass == 5 and client.get_shared_bool("as_jockey", true)) or
+                (zclass == 1 and client.get_shared_bool("as_smoker", true)) or
+                (zclass == 4 and client.get_shared_bool("as_spitter", true)) or
+                (zclass == 2 and client.get_shared_bool("as_boomer", true))) then
+                local target_pos = vector.new(ent:get_origin().x, ent:get_origin().y, ent:get_origin().z + 55)
+                local dist = vector.distance(eye_pos, target_pos)
+                if dist <= range then
+                    local aim_angles = calc_angle(eye_pos, target_pos)
+                    local this_fov = legit and get_fov(view_angles, aim_angles) or 0
+                    if this_fov < best_fov then
+                        best_fov = this_fov
+                        best_target = ent
+                    end
+                end
+            end
+        end
+    end
+    
+    if best_target then
+        cmd:set_buttons(buttons | 2048) -- IN_ATTACK2
+        last_shove_time = curtime  -- reset delay real
+        
+        local target_pos = vector.new(best_target:get_origin().x, best_target:get_origin().y, best_target:get_origin().z + 55)
+        local aim_angles = calc_angle(eye_pos, target_pos)
+        
+        if silent then
+            cmd:set_viewangles(aim_angles) -- Snap solo server-side (como el primer Lua)
+            -- NO engine.set_view_angles → tu cámara no gira
+        else
+            cmd:set_viewangles(aim_angles)
+            engine.set_view_angles(aim_angles) -- Snap completo
+        end
+    end
+end
+
+client.print("💀 Auto Shove cargado! (Enable ON + Silent ON + Targets ON + Range 90.500 + Delay 0.027)")
+
+
+===== FILE: fue pe.lua =====
+
+-- Jockey Free Ride (Heaven)
+-- Cuando TÚ eres Jockey y estás cabalgando: control total de movimiento
+-- (la resistencia del survivor se neutraliza lo máximo posible en cliente)
+
+local JOCKEY_CLASS = 5
+local TEAM_INFECTED = 3
+local IN_FORWARD = 8
+local IN_BACK = 16
+local IN_MOVELEFT = 512
+local IN_MOVERIGHT = 1024
+local IN_SPEED = 131072
+
+-- offsets candidatos de victim handle (validar en tu build si falla detección)
+local VICTIM_HANDLE_OFFSETS = { 10060, 10056, 10064, 10052, 16020, 16024 }
+
+local function is_jockey(lp)
+    if not lp or not lp:is_alive() then return false end
+    if lp:get_team() ~= TEAM_INFECTED then return false end
+    if lp:is_ghost and lp:is_ghost() then return false end
+    return lp:get_zombie_class() == JOCKEY_CLASS
+end
+
+local function handle_valid(h)
+    if not h or h == 0 or h == -1 then return false end
+    -- handles Source suelen ser serializados; índice bajo en low bits
+    local idx = h % 65536
+    return idx > 0 and idx < 2048
+end
+
+local function is_riding(lp)
+    -- 1) sequence name
+    local ok, seq = pcall(function()
+        local s = lp:get_sequence_name and lp:get_sequence_name(lp:get_solid_flags and 0 or 0)
+        return s
+    end)
+    -- mejor: intentar get_sequence si existe vía raw
+    local raw = entity.get_by_index_raw(lp:get_index())
+    if raw and raw ~= 0 then
+        local ok2, seq_id = pcall(entity.get_sequence_from_ptr, raw)
+        if ok2 and seq_id then
+            local ok3, name = pcall(function() return lp:get_sequence_name(seq_id) end)
+            if ok3 and name then
+                local n = string.lower(name)
+                if string.find(n, "jockey", 1, true)
+                    or string.find(n, "ride", 1, true)
+                    or string.find(n, "leap", 1, true) then
+                    -- leap solo no basta; ride/jockey sí
+                    if string.find(n, "ride", 1, true) or string.find(n, "jockey", 1, true) then
+                        return true
+                    end
+                end
+            end
+        end
+
+        -- 2) victim handle en memoria
+        for _, off in ipairs(VICTIM_HANDLE_OFFSETS) do
+            local okh, h = pcall(memory.read_int, raw + off)
+            if okh and handle_valid(h) then
+                local idx = h % 65536
+                local vic = entity.get_by_index(idx)
+                if vic and vic:is_alive() and vic:get_team() == 2 then
+                    return true
+                end
+            end
+        end
+    end
+
+    -- 3) fallback: move_type / flags raros mientras jockey (menos fiable)
+    return false
+end
+
+local function force_full_move(cmd)
+    local buttons = cmd:get_buttons()
+    local fm = 0.0
+    local sm = 0.0
+
+    -- lee input real
+    if (buttons & IN_FORWARD) ~= 0 then fm = fm + 1 end
+    if (buttons & IN_BACK) ~= 0 then fm = fm - 1 end
+    if (buttons & IN_MOVERIGHT) ~= 0 then sm = sm + 1 end
+    if (buttons & IN_MOVELEFT) ~= 0 then sm = sm - 1 end
+
+    -- también respeta analog stick de cmd si el jugador ya movió
+    local cf = cmd:get_forwardmove()
+    local cs = cmd:get_sidemove()
+    if math.abs(cf) > 1 then fm = (cf > 0) and 1 or -1 end
+    if math.abs(cs) > 1 then sm = (cs > 0) and 1 or -1 end
+
+    -- si no hay input, empuja siempre adelante (control total tipo zonemod)
+    if fm == 0 and sm == 0 then
+        fm = 1
+    end
+
+    -- normaliza a máximo wish speed
+    local len = math.sqrt(fm * fm + sm * sm)
+    if len > 0 then
+        fm = (fm / len) * 450.0
+        sm = (sm / len) * 450.0
+    end
+
+    cmd:set_forwardmove(fm)
+    cmd:set_sidemove(sm)
+
+    -- limpia back implícito: solo deja flags coherentes
+    local nb = buttons
+    if fm > 0 then
+        nb = (nb | IN_FORWARD) & ~IN_BACK
+    elseif fm < 0 then
+        nb = (nb | IN_BACK) & ~IN_FORWARD
+    end
+    if sm > 0 then
+        nb = (nb | IN_MOVERIGHT) & ~IN_MOVELEFT
+    elseif sm < 0 then
+        nb = (nb | IN_MOVELEFT) & ~IN_MOVERIGHT
+    end
+    cmd:set_buttons(nb)
+end
+
+function on_create_move(cmd, local_player)
+    if not cmd or not local_player then return end
+    if not engine.is_in_game() then return end
+    if not is_jockey(local_player) then return end
+    if not is_riding(local_player) then return end
+
+    force_full_move(cmd)
+end
+
+-- refuerzo en prediction (misma lógica)
+function on_create_move_prediction(cmd, local_player)
+    if not cmd or not local_player then return end
+    if not is_jockey(local_player) then return end
+    if not is_riding(local_player) then return end
+    force_full_move(cmd)
+end
+
+function on_paint()
+    local lp = client.get_local_player()
+    if not lp or not is_jockey(lp) then return end
+    if not is_riding(lp) then return end
+    draw.string(fonts.DEBUG, 10, 100, 0.3, 1.0, 0.4, 1.0, text_align.LEFT, "JOCKEY FREE RIDE")
+end
+
+client.print("[Jockey Free Ride] loaded — solo actúa mientras cabalgas")
+
+===== FILE: Gray World.lua =====
+
+-- Gray World Textures + Perfect Directional Strafer combinados
+-- Código original intacto de ambos, sin cambios
+
+-- Gray World Textures (original)
+function on_find_material(material_name, texture_group)
+    if texture_group and string.find(texture_group, "World textures") then
+        -- return "dev/graygrid"
+        return "dev/graygrid"
+    end
+    return nil
+end
+
